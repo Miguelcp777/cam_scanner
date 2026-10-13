@@ -1,0 +1,9 @@
+node_modules
+dist
+dev-dist
+
+# Configuración local de Claude Code
+.claude/
+
+# Análisis de ingeniería inversa de CamScanner (REA): solo local, no se publica
+docs/
