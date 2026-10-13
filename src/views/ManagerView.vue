@@ -70,6 +70,8 @@ watch(current, load, { immediate: true })
       <template v-for="c in crumbs" :key="c.id"> › <a class="crumb" @click="open(c.id)">{{ c.name }}</a></template>
     </h1>
     <span class="spacer" />
+    <RouterLink class="btn" to="/file/search" title="Buscar">🔍</RouterLink>
+    <RouterLink class="btn" to="/file/recycler" title="Papelera">🗑</RouterLink>
     <button class="btn" @click="newFolder">📁 Nueva carpeta</button>
     <button class="btn primary" @click="input.click()">⬆ Importar</button>
     <input ref="input" type="file" accept="image/*,application/pdf" multiple hidden @change="onFiles($event.target.files)" />

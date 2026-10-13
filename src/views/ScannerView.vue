@@ -1,37 +1,30 @@
 <script setup>
-// Flujo: elegir (cámara / imágenes) → recortar → filtro → añadir página → revisar → guardar.
+// Flujo: elegir (cámara / imágenes) → procesar cada página → revisar → guardar.
+//  - Una página: foto → PageProcessor (recorte con lupa, filtro, giro, aplanado).
+//  - Ráfaga ("Varias páginas") o varias imágenes importadas: se procesan solas y se revisan al final;
+//    tocando una página se reajusta con PageProcessor.
 // ?camera=1 abre la cámara; ?append=<idDoc> añade las páginas a un documento existente.
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import CropEditor from '../components/CropEditor.vue'
+import PageProcessor from '../components/PageProcessor.vue'
 import { createScanDoc, getDoc, saveDoc, uid } from '../lib/db'
-import {
-  applyFilter,
-  canvasToBlob,
-  createLiveDetector,
-  detectCorners,
-  FILTERS,
-  flattenDocument,
-  fullCorners,
-  loadCV,
-  prepareImage,
-  releaseCanvas,
-  warpDocument,
-  warpImage,
-} from '../lib/scan'
+import { autoPage } from '../lib/process'
+import { canvasToBlob, createLiveDetector, loadCV, releaseCanvas, rotateBlob } from '../lib/scan'
 import { blobUrl, defaultScanName, isTouch, pending } from '../lib/util'
 
 const route = useRoute()
 const router = useRouter()
 
-const step = ref('pick') // pick | camera | crop | filter | review
+const step = ref('pick') // pick | camera | process | auto | review | edit
 const busy = ref('')
 const error = ref('')
-const queue = ref([])
+const queue = ref([]) // [{ blob, hint }] pendientes de procesar paso a paso
 const pages = ref([])
 const name = ref(defaultScanName())
 const folderId = ref(null)
 const appendTo = ref(route.query.append || null)
+const autoProgress = ref({ done: 0, total: 0 })
+const editing = ref(-1) // índice de la página que se reajusta en la revisión
 
 const video = ref(null)
 const imgInput = ref(null)
@@ -39,55 +32,26 @@ const camInput = ref(null)
 const touch = isTouch()
 let stream = null
 
-// Página en curso (canvas: se liberan al terminar cada página por el límite de memoria de iOS)
-const cur = { img: null, warped: null, filtered: null }
-function releaseCurrent() {
-  ;['img', 'warped', 'filtered'].forEach((k) => {
-    releaseCanvas(cur[k])
-    cur[k] = null
-  })
-  URL.revokeObjectURL(curUrl.value)
-}
-const curUrl = ref('')
-const curSize = ref({ w: 1, h: 1 })
-const points = ref([])
-const detected = ref(true)
-const edited = ref(false) // el usuario ha movido las esquinas a mano
+const backToList = () => (step.value = pages.value.length ? 'review' : 'pick')
 
-function setPoints(p) {
-  points.value = p
-  edited.value = true
-}
-const filter = ref('enhance')
-const previewUrl = ref('')
-
-async function run(label, fn) {
-  busy.value = label
-  error.value = ''
-  try {
-    await fn()
-  } catch (e) {
-    console.error(e)
-    error.value = e.message || String(e)
-  } finally {
-    busy.value = ''
-  }
-}
-
-// --- Cámara en la app con detección de bordes en vivo ---
+// --- Cámara con detección de bordes en vivo ---
 const liveQuad = ref(null) // esquinas en coordenadas del vídeo
 const videoSize = ref({ w: 1, h: 1 })
 const stable = ref(0)
 const auto = ref(true)
+const burst = ref(false) // ráfaga: varias páginas seguidas sin salir de la cámara
+const shots = ref([]) // capturas de la ráfaga: [{ blob, hint, url }]
+const flash = ref(false)
 const STABLE_TICKS = 8 // ~1,2 s quieto → foto automática
-const hints = new WeakMap() // foto → esquinas detectadas en vivo (respaldo)
 let detector = null
 let loopTimer = null
 let capturing = false
+let lastSig = null // firma de la última captura (evita repetir la misma hoja en ráfaga)
 
 const livePolygon = computed(() => liveQuad.value?.map((p) => `${p.x},${p.y}`).join(' ') || '')
 const cameraHint = computed(() => {
   if (!liveQuad.value) return 'Buscando documento… Encuadra la hoja sobre un fondo que contraste.'
+  if (burst.value && lastSig && !isNewPage()) return 'Cambia de hoja para la siguiente página'
   if (!auto.value) return 'Documento detectado. Pulsa el botón para capturar.'
   return stable.value >= STABLE_TICKS / 2 ? 'Mantén el móvil quieto…' : 'Documento detectado'
 })
@@ -100,7 +64,7 @@ async function startCamera() {
       audio: false,
     })
     step.value = 'camera'
-    await new Promise(requestAnimationFrame)
+    await nextTick()
     video.value.srcObject = stream
     await video.value.play().catch(() => {})
     const { cv } = await loadCV()
@@ -108,11 +72,35 @@ async function startCamera() {
     detectLoop()
   } catch (e) {
     error.value = 'No se pudo acceder a la cámara: ' + (e.message || e.name) + '. Puedes importar imágenes.'
-    step.value = pages.value.length ? 'review' : 'pick'
+    backToList()
   }
 }
 
 const moved = (a, b, tol) => a.some((p, i) => Math.hypot(p.x - b[i].x, p.y - b[i].y) > tol)
+
+// Miniatura 32×32 en grises de la zona del documento: si apenas cambia, es la misma hoja
+const sigCanvas = document.createElement('canvas')
+sigCanvas.width = sigCanvas.height = 32
+function signature() {
+  const v = video.value
+  const q = liveQuad.value
+  if (!q || !v.videoWidth) return null
+  const xs = q.map((p) => p.x), ys = q.map((p) => p.y)
+  const x0 = Math.min(...xs), y0 = Math.min(...ys)
+  const ctx = sigCanvas.getContext('2d', { willReadFrequently: true })
+  ctx.drawImage(v, x0, y0, Math.max(...xs) - x0, Math.max(...ys) - y0, 0, 0, 32, 32)
+  const d = ctx.getImageData(0, 0, 32, 32).data
+  const g = new Uint8Array(1024)
+  for (let i = 0; i < 1024; i++) g[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3
+  return g
+}
+function isNewPage() {
+  const s = signature()
+  if (!s || !lastSig) return true
+  let diff = 0
+  for (let i = 0; i < s.length; i++) diff += Math.abs(s[i] - lastSig[i])
+  return diff / s.length > 9
+}
 
 function detectLoop() {
   clearTimeout(loopTimer)
@@ -124,7 +112,10 @@ function detectLoop() {
     const tol = Math.max(videoSize.value.w, videoSize.value.h) * 0.025
     stable.value = q && liveQuad.value && !moved(q, liveQuad.value, tol) ? stable.value + 1 : 0
     liveQuad.value = q
-    if (auto.value && stable.value >= STABLE_TICKS) return capture()
+    if (auto.value && stable.value >= STABLE_TICKS && (!burst.value || isNewPage())) {
+      capture()
+      return
+    }
   } catch (e) {
     console.error(e)
   }
@@ -151,125 +142,113 @@ async function capture() {
     c.height = v.videoHeight
     c.getContext('2d').drawImage(v, 0, 0)
     const blob = await canvasToBlob(c, 'image/jpeg', 0.95)
-    if (liveQuad.value) hints.set(blob, { pts: liveQuad.value, w: c.width })
     releaseCanvas(c)
-    stopCamera()
-    queue.value.push(blob)
-    next()
+    const hint = liveQuad.value ? { pts: liveQuad.value, w: v.videoWidth } : null
+    if (burst.value) {
+      lastSig = signature()
+      shots.value.push({ blob, hint, url: URL.createObjectURL(blob) })
+      flash.value = true
+      setTimeout(() => (flash.value = false), 180)
+      stable.value = 0
+      loopTimer = setTimeout(detectLoop, 400)
+    } else {
+      stopCamera()
+      queue.value.push({ blob, hint })
+      step.value = 'process'
+    }
   } finally {
     capturing = false
   }
 }
 
-function addImages(files) {
-  queue.value.push(...[...files].filter((f) => f.type.startsWith('image/')))
-  next()
-}
-
-function next() {
-  if (!queue.value.length) {
-    step.value = pages.value.length ? 'review' : 'pick'
-    return
-  }
-  run('Detectando bordes…', async () => {
-    const blob = queue.value[0]
-    const src = await prepareImage(blob)
-    cur.img = src
-    curUrl.value = URL.createObjectURL(blob)
-    curSize.value = { w: src.width, h: src.height }
-    // 1) detección sobre la foto, 2) esquinas vistas en vivo, 3) imagen completa
-    let pts = await detectCorners(src)
-    const hint = hints.get(blob)
-    if (!pts && hint) {
-      const k = src.width / hint.w
-      pts = hint.pts.map((p) => ({ x: p.x * k, y: p.y * k }))
-    }
-    detected.value = !!pts
-    edited.value = false
-    points.value = pts || fullCorners(src.width, src.height)
-    step.value = 'crop'
-  })
-}
-
-function confirmCrop() {
-  run('Corrigiendo perspectiva…', async () => {
-    releaseCanvas(cur.warped)
-    if (edited.value) {
-      cur.warped = await warpImage(cur.img, points.value)
-    } else {
-      // Esquinas automáticas: segunda pasada para ajustar al papel exacto
-      const r = await warpDocument(cur.img, points.value)
-      cur.warped = r.canvas
-      points.value = r.points
-    }
-    await applyFlatten()
-    await renderFilter(filter.value)
-    step.value = 'filter'
-  })
-}
-
-// Aplanado de papel curvado (si está activado y se detecta curvatura)
-const flatten = ref(true)
-const flattened = ref('') // descripción de lo corregido, para informar al usuario
-
-async function applyFlatten() {
-  flattened.value = ''
-  if (!flatten.value) return
-  busy.value = 'Aplanando el papel…'
-  const r = await flattenDocument(cur.img, points.value)
-  if (!r) return
-  releaseCanvas(cur.warped)
-  cur.warped = r.canvas
-  flattened.value = [r.edges && 'bordes', r.lines && 'renglones'].filter(Boolean).join(' y ')
-}
-
-function toggleFlatten() {
-  run('Aplanando el papel…', async () => {
-    releaseCanvas(cur.warped)
-    cur.warped = await warpImage(cur.img, points.value)
-    await applyFlatten()
-    await renderFilter(filter.value)
-  })
-}
-
-async function renderFilter(f) {
-  filter.value = f
-  releaseCanvas(cur.filtered)
-  cur.filtered = await applyFilter(cur.warped, f)
-  previewUrl.value = cur.filtered.toDataURL('image/jpeg', 0.7)
-}
-
-function addPage() {
-  run('Guardando página…', async () => {
-    const blob = await canvasToBlob(cur.filtered)
-    pages.value.push({ id: uid(), blob, width: cur.filtered.width, height: cur.filtered.height, text: '' })
-    releaseCurrent()
-    previewUrl.value = ''
-    queue.value.shift()
-    next()
-  })
-}
-
-function discardCurrent() {
-  releaseCurrent()
-  queue.value.shift()
-  next()
-}
-
-// Cámara en la app (detección en vivo). La cámara del sistema queda como alternativa en móvil.
-function newPhoto() {
-  startCamera()
-}
-
-function systemCamera() {
+function cancelCamera() {
   stopCamera()
-  step.value = pages.value.length ? 'review' : 'pick'
-  camInput.value.click()
+  shots.value.forEach((s) => URL.revokeObjectURL(s.url))
+  shots.value = []
+  lastSig = null
+  backToList()
 }
 
+// Fin de la ráfaga: procesar todas las capturas
+function finishBurst() {
+  stopCamera()
+  const list = shots.value.map(({ blob, hint, url }) => {
+    URL.revokeObjectURL(url)
+    return { blob, hint }
+  })
+  shots.value = []
+  lastSig = null
+  processAll(list)
+}
+
+function processAll(list) {
+  if (!list.length) return backToList()
+  step.value = 'auto'
+  autoProgress.value = { done: 0, total: list.length }
+  run('', async () => {
+    for (const item of list) {
+      pages.value.push(await autoPage(item.blob, item.hint))
+      autoProgress.value.done++
+    }
+    step.value = 'review'
+  })
+}
+
+// Una imagen: paso a paso; varias: automático y revisión al final
+function addImages(files) {
+  const imgs = [...files].filter((f) => f.type.startsWith('image/')).map((blob) => ({ blob, hint: null }))
+  if (!imgs.length) return
+  if (imgs.length === 1) {
+    queue.value.push(imgs[0])
+    step.value = 'process'
+  } else {
+    processAll(imgs)
+  }
+}
+
+function onProcessed(page) {
+  pages.value.push({ id: uid(), text: '', ...page })
+  queue.value.shift()
+  if (queue.value.length) return
+  // Tras una página hecha con la cámara, seguir escaneando es lo más habitual
+  backToList()
+}
+
+function onDiscard() {
+  queue.value.shift()
+  if (!queue.value.length) backToList()
+}
+
+// --- Revisión ---
 function movePage(i, d) {
   const p = pages.value
   ;[p[i], p[i + d]] = [p[i + d], p[i]]
+}
+
+function quickRotate(i) {
+  run('Girando…', async () => {
+    const p = pages.value[i]
+    Object.assign(p, await rotateBlob(p.blob, 90), { rotation: ((p.rotation || 0) + 90) % 360 })
+  })
+}
+
+function onEdited(page) {
+  Object.assign(pages.value[editing.value], page)
+  editing.value = -1
+  step.value = 'review'
+}
+
+async function run(label, fn) {
+  busy.value = label
+  error.value = ''
+  try {
+    await fn()
+  } catch (e) {
+    console.error(e)
+    error.value = e.message || String(e)
+  } finally {
+    busy.value = ''
+  }
 }
 
 function save() {
@@ -286,13 +265,19 @@ function save() {
   })
 }
 
+function systemCamera() {
+  stopCamera()
+  backToList()
+  camInput.value.click()
+}
+
 onMounted(() => {
   if (pending.files.length) {
-    queue.value = pending.files
+    const files = pending.files
     folderId.value = pending.folderId
     pending.files = []
     pending.folderId = null
-    next()
+    addImages(files)
   } else if (route.query.camera) {
     startCamera()
   }
@@ -300,7 +285,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopCamera()
-  releaseCurrent()
+  shots.value.forEach((s) => URL.revokeObjectURL(s.url))
 })
 </script>
 
@@ -309,15 +294,15 @@ onBeforeUnmount(() => {
     <h1>{{ appendTo ? 'Añadir páginas' : 'Escanear' }}</h1>
     <span class="spacer" />
     <span v-if="pages.length" class="muted">{{ pages.length }} página(s)</span>
-    <button v-if="pages.length && step !== 'review'" class="btn" @click="stopCamera(); step = 'review'">Revisar ›</button>
+    <button v-if="pages.length && ['pick', 'camera'].includes(step)" class="btn" @click="stopCamera(); step = 'review'">Revisar ›</button>
   </div>
 
   <p v-if="error" class="error">{{ error }}</p>
-  <p v-if="busy" class="muted">⏳ {{ busy }} <small v-if="busy.startsWith('Detectando')">(la primera vez se descarga OpenCV, ~10 MB)</small></p>
+  <p v-if="busy" class="muted">⏳ {{ busy }}</p>
 
   <!-- Elegir origen -->
   <div v-if="step === 'pick' && !busy" class="pick">
-    <button class="big" @click="newPhoto">📷<span>Escanear con la cámara</span></button>
+    <button class="big" @click="startCamera">📷<span>Escanear con la cámara</span></button>
     <button class="big" @click="imgInput.click()">🖼️<span>Importar imágenes</span></button>
   </div>
   <p v-if="step === 'pick' && touch && !busy" class="muted center-text">
@@ -326,7 +311,11 @@ onBeforeUnmount(() => {
 
   <!-- Cámara con detección en vivo -->
   <div v-show="step === 'camera'" class="camera">
-    <div class="viewfinder">
+    <div class="modes">
+      <button :class="['mode', { on: !burst }]" @click="burst = false">Una página</button>
+      <button :class="['mode', { on: burst }]" @click="burst = true">Varias páginas</button>
+    </div>
+    <div :class="['viewfinder', { flash }]">
       <video ref="video" autoplay playsinline muted />
       <svg :viewBox="`0 0 ${videoSize.w} ${videoSize.h}`" preserveAspectRatio="xMidYMid meet">
         <polygon
@@ -339,9 +328,13 @@ onBeforeUnmount(() => {
       <div class="cam-hint">{{ cameraHint }}</div>
     </div>
     <div class="row center">
-      <button class="btn" @click="stopCamera(); step = pages.length ? 'review' : 'pick'">Cancelar</button>
+      <button class="btn" @click="cancelCamera">Cancelar</button>
       <button class="shutter" title="Capturar" @click="capture" />
       <label class="auto"><input v-model="auto" type="checkbox" /> Auto</label>
+    </div>
+    <div v-if="burst && shots.length" class="burst">
+      <img v-for="(s, i) in shots.slice(-4)" :key="i" :src="s.url" alt="" />
+      <button class="btn primary" @click="finishBurst">Hecho ({{ shots.length }}) ›</button>
     </div>
     <div class="row center">
       <button class="btn small" @click="stopCamera(); imgInput.click()">🖼️ Galería</button>
@@ -349,52 +342,48 @@ onBeforeUnmount(() => {
     </div>
   </div>
 
-  <!-- Recorte -->
-  <div v-if="step === 'crop' && !busy" class="stage">
-    <p v-if="detected" class="muted">Ajusta las esquinas al borde del documento.</p>
-    <p v-else class="warn">No se detectó el borde del documento. Arrastra las esquinas a mano o repite la foto sobre un fondo que contraste con el papel.</p>
-    <CropEditor :model-value="points" :src="curUrl" :width="curSize.w" :height="curSize.h" @update:model-value="setPoints" />
-    <div class="row center">
-      <button class="btn danger" @click="discardCurrent">Descartar</button>
-      <button class="btn" @click="setPoints(fullCorners(curSize.w, curSize.h))">Imagen completa</button>
-      <button class="btn primary" @click="confirmCrop">Recortar ›</button>
-    </div>
-    <p v-if="queue.length > 1" class="muted">Quedan {{ queue.length - 1 }} imagen(es) más.</p>
+  <!-- Procesado paso a paso de la siguiente imagen -->
+  <PageProcessor
+    v-if="step === 'process' && queue.length"
+    :key="queue.length + ':' + pages.length"
+    :source="queue[0].blob"
+    :hint="queue[0].hint"
+    @done="onProcessed"
+    @cancel="onDiscard"
+  />
+
+  <!-- Procesado automático (ráfaga / varias imágenes) -->
+  <div v-if="step === 'auto'" class="card autoproc">
+    <p>Procesando páginas… {{ autoProgress.done }} de {{ autoProgress.total }}</p>
+    <div class="progress"><div :style="{ width: (autoProgress.done / autoProgress.total) * 100 + '%' }" /></div>
+    <p class="muted">Bordes, perspectiva, aplanado y filtro Documento, de forma automática.</p>
   </div>
 
-  <!-- Filtros -->
-  <div v-if="step === 'filter'" class="stage">
-    <img :src="previewUrl" class="preview" alt="Vista previa" />
-    <div class="row center flat">
-      <label><input v-model="flatten" type="checkbox" :disabled="!!busy" @change="toggleFlatten" /> Aplanar curvatura</label>
-      <span v-if="flatten && flattened" class="muted">· corregidos {{ flattened }}</span>
-      <span v-else-if="flatten" class="muted">· sin curvatura apreciable</span>
-    </div>
-    <div class="row center">
-      <button
-        v-for="f in FILTERS"
-        :key="f.id"
-        :class="['btn', { primary: filter === f.id }]"
-        :disabled="!!busy"
-        @click="run('Aplicando filtro…', () => renderFilter(f.id))"
-      >
-        {{ f.label }}
-      </button>
-    </div>
-    <div class="row center">
-      <button class="btn" :disabled="!!busy" @click="step = 'crop'">‹ Recortar</button>
-      <button class="btn primary" :disabled="!!busy" @click="addPage">✓ Añadir página</button>
-    </div>
-  </div>
+  <!-- Reajustar una página de la revisión -->
+  <PageProcessor
+    v-if="step === 'edit' && editing >= 0"
+    :key="'edit-' + pages[editing].id"
+    :source="pages[editing].original || pages[editing].blob"
+    :is-original="!!pages[editing].original"
+    :initial="pages[editing].original ? pages[editing] : null"
+    done-label="✓ Guardar cambios"
+    cancel-label="Cancelar"
+    @done="onEdited"
+    @cancel="editing = -1; step = 'review'"
+  />
 
   <!-- Revisión -->
-  <div v-if="step === 'review' && !busy" class="stage review">
+  <div v-if="step === 'review'" class="review">
+    <p class="muted">Toca ✏️ para reajustar el recorte, el filtro o el giro de una página.</p>
     <div class="pages">
-      <div v-for="(p, i) in pages" :key="p.id" class="page">
-        <img :src="blobUrl(p.blob)" alt="" />
+      <div v-for="(p, i) in pages" :key="p.id" :class="['page', { warn: p.detected === false }]">
+        <img :src="blobUrl(p.blob)" alt="" @click="editing = i; step = 'edit'" />
+        <p v-if="p.detected === false" class="warn-text">⚠ Bordes no detectados</p>
         <div class="row">
           <span class="muted">{{ i + 1 }}</span>
           <span class="spacer" />
+          <button class="btn small" title="Editar" @click="editing = i; step = 'edit'">✏️</button>
+          <button class="btn small" title="Girar" @click="quickRotate(i)">↻</button>
           <button class="btn small" :disabled="i === 0" @click="movePage(i, -1)">◀</button>
           <button class="btn small" :disabled="i === pages.length - 1" @click="movePage(i, 1)">▶</button>
           <button class="btn small danger" @click="pages.splice(i, 1)">🗑</button>
@@ -402,11 +391,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <div class="row">
-      <button class="btn" @click="newPhoto">📷 Escanear otra</button>
+      <button class="btn" @click="startCamera">📷 Escanear más</button>
       <button class="btn" @click="imgInput.click()">🖼️ Importar más</button>
       <span class="spacer" />
       <input v-if="!appendTo" v-model="name" type="text" placeholder="Nombre del documento" />
-      <button class="btn primary" :disabled="!pages.length" @click="save">💾 Guardar</button>
+      <button class="btn primary" :disabled="!pages.length || !!busy" @click="save">💾 Guardar</button>
     </div>
   </div>
 
@@ -425,10 +414,12 @@ onBeforeUnmount(() => {
 .big span { font-size: 1rem; }
 .big:hover { border-color: var(--accent); }
 .center-text { text-align: center; }
-.flat { font-size: .9rem; }
-.flat label { display: flex; align-items: center; gap: 6px; }
+.modes { display: flex; justify-content: center; gap: 4px; margin-bottom: 8px; }
+.mode { border: 1px solid var(--border); background: var(--surface); padding: 6px 14px; border-radius: 16px; font: inherit; font-size: .9rem; cursor: pointer; }
+.mode.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .viewfinder { position: relative; background: #000; border-radius: 12px; overflow: hidden; }
-.viewfinder video { display: block; width: 100%; max-height: 68vh; object-fit: contain; }
+.viewfinder.flash::after { content: ''; position: absolute; inset: 0; background: #fff; opacity: .7; }
+.viewfinder video { display: block; width: 100%; max-height: 64vh; object-fit: contain; }
 .viewfinder svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .live { fill: rgba(18, 163, 127, .25); stroke: #3ee0b4; stroke-linejoin: round; transition: fill .2s; }
 .live.steady { fill: rgba(18, 163, 127, .45); stroke: #fff; }
@@ -436,15 +427,20 @@ onBeforeUnmount(() => {
   position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); background: rgba(0, 0, 0, .6); color: #fff;
   padding: 6px 12px; border-radius: 16px; font-size: .85rem; white-space: nowrap; max-width: 92%; overflow: hidden; text-overflow: ellipsis;
 }
-.auto { display: flex; align-items: center; gap: 4px; font-size: .9rem; }
-.warn { background: #fff4e5; border: 1px solid #f0c27a; color: #7a4b00; border-radius: 8px; padding: 8px 12px; font-size: .9rem; }
 .center { justify-content: center; margin: 12px 0; }
 .shutter { width: 64px; height: 64px; border-radius: 50%; border: 5px solid var(--accent); background: #fff; cursor: pointer; }
 .shutter:active { background: var(--accent-soft); }
-.stage { text-align: center; }
-.preview { max-width: 100%; max-height: 60vh; box-shadow: 0 2px 12px rgba(0, 0, 0, .15); }
-.review { text-align: left; }
+.auto { display: flex; align-items: center; gap: 4px; font-size: .9rem; }
+.burst { display: flex; align-items: center; gap: 6px; justify-content: center; margin-bottom: 8px; }
+.burst img { width: 44px; height: 58px; object-fit: cover; border-radius: 4px; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); }
+.autoproc { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
 .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .page { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 6px; }
-.page img { width: 100%; aspect-ratio: 3 / 4; object-fit: contain; background: #eef1f3; border-radius: 6px; }
+.page.warn { border-color: #f0c27a; }
+.page img { width: 100%; aspect-ratio: 3 / 4; object-fit: contain; background: #eef1f3; border-radius: 6px; cursor: pointer; }
+.warn-text { margin: 4px 0; font-size: .75rem; color: #7a4b00; }
+@media (max-width: 720px) {
+  .pages { grid-template-columns: repeat(2, 1fr); }
+  .page .row { gap: 4px; }
+}
 </style>

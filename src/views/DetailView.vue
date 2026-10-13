@@ -3,7 +3,8 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ResultPanel from '../components/ResultPanel.vue'
 import { TARGETS } from '../lib/convert'
-import { deleteDoc, getDoc, listFolders, saveDoc } from '../lib/db'
+import { getDoc, listFolders, saveDoc, trashDoc } from '../lib/db'
+import { rotateBlob } from '../lib/scan'
 import { layoutText } from '../lib/layout'
 import { recognize } from '../lib/ocr'
 import { pageLayouts } from '../lib/pages'
@@ -82,10 +83,17 @@ async function removePage(i) {
 }
 
 async function removeDoc() {
-  if (!confirm(`¿Eliminar "${doc.value.name}"? No se puede deshacer.`)) return
-  await deleteDoc(doc.value.id)
+  if (!confirm(`¿Mover "${doc.value.name}" a la papelera? Podrás restaurarlo durante 30 días.`)) return
+  await trashDoc(doc.value.id)
   router.replace('/file/recent')
 }
+
+const rotatePage = (i) =>
+  task('Girando…', async () => {
+    const p = doc.value.pages[i]
+    Object.assign(p, await rotateBlob(p.blob, 90), { rotation: ((p.rotation || 0) + 90) % 360 })
+    await persist()
+  })
 
 const copyText = () => navigator.clipboard.writeText(fullText.value)
 const exportText = () => (results.value = [{ blob: new Blob([fullText.value], { type: 'text/plain' }), name: `${doc.value.name}.txt` }])
@@ -118,7 +126,7 @@ watch(() => route.query.id, load, { immediate: true })
         <option :value="null">📁 Mi documento (raíz)</option>
         <option v-for="f in folders" :key="f.id" :value="f.id">📁 {{ f.name }}</option>
       </select>
-      <button class="btn danger" @click="removeDoc">🗑 Eliminar</button>
+      <button class="btn danger" @click="removeDoc">🗑 A la papelera</button>
     </div>
 
     <div v-if="busy" class="busy">
@@ -135,6 +143,8 @@ watch(() => route.query.id, load, { immediate: true })
           <span class="muted">{{ i + 1 }}</span>
           <span v-if="p.text" class="muted" title="Texto reconocido">🔤</span>
           <span class="spacer" />
+          <RouterLink class="btn small" title="Editar recorte, filtro y giro" :to="{ path: '/file/page', query: { doc: doc.id, page: p.id } }">✏️</RouterLink>
+          <button class="btn small" title="Girar 90°" :disabled="!!busy" @click="rotatePage(i)">↻</button>
           <button class="btn small" :disabled="i === 0" @click="movePage(i, -1)">◀</button>
           <button class="btn small" :disabled="i === doc.pages.length - 1" @click="movePage(i, 1)">▶</button>
           <button class="btn small danger" @click="removePage(i)">🗑</button>

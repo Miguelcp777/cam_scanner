@@ -34,6 +34,36 @@ export async function prepareImage(blob, maxSide = 3000) {
 
 const sizeOf = (src) => ({ w: src.naturalWidth || src.width, h: src.naturalHeight || src.height })
 
+// Gira un canvas 0/90/180/270° en sentido horario (devuelve el mismo canvas si es 0°)
+export function rotateCanvas(src, deg) {
+  const d = ((deg % 360) + 360) % 360
+  if (!d) return src
+  const c = document.createElement('canvas')
+  const swap = d === 90 || d === 270
+  c.width = swap ? src.height : src.width
+  c.height = swap ? src.width : src.height
+  const x = c.getContext('2d')
+  x.translate(c.width / 2, c.height / 2)
+  x.rotate((d * Math.PI) / 180)
+  x.drawImage(src, -src.width / 2, -src.height / 2)
+  return c
+}
+
+export async function rotateBlob(blob, deg) {
+  const img = await loadImage(blob)
+  const c = document.createElement('canvas')
+  c.width = img.naturalWidth
+  c.height = img.naturalHeight
+  c.getContext('2d').drawImage(img, 0, 0)
+  URL.revokeObjectURL(img.src)
+  const r = rotateCanvas(c, deg)
+  const out = await canvasToBlob(r, blob.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.92)
+  const size = { width: r.width, height: r.height }
+  releaseCanvas(c)
+  releaseCanvas(r)
+  return { blob: out, ...size }
+}
+
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
 
 export function fullCorners(w, h) {
@@ -86,18 +116,52 @@ function plausibleQuad(q) {
 function quadFromContour(cv, cnt) {
   const hull = new cv.Mat()
   cv.convexHull(cnt, hull, false, true)
-  const peri = cv.arcLength(hull, true)
-  let quad = null
-  for (let eps = 0.015; eps <= 0.1 && !quad; eps += 0.01) {
-    const approx = new cv.Mat()
-    cv.approxPolyDP(hull, approx, eps * peri, true)
-    const n = approx.rows
-    if (n === 4) quad = [0, 1, 2, 3].map((k) => ({ x: approx.data32S[k * 2], y: approx.data32S[k * 2 + 1] }))
-    approx.delete()
-    if (n < 4) break
+  try {
+    const peri = cv.arcLength(hull, true)
+    // 1) Contorno de lados rectos: basta una aproximación ajustada a 4 vértices
+    for (let eps = 0.01; eps <= 0.03; eps += 0.005) {
+      const approx = new cv.Mat()
+      cv.approxPolyDP(hull, approx, eps * peri, true)
+      const n = approx.rows
+      const quad = n === 4 ? [0, 1, 2, 3].map((k) => ({ x: approx.data32S[k * 2], y: approx.data32S[k * 2 + 1] })) : null
+      approx.delete()
+      if (quad) return quad
+      if (n < 4) break
+    }
+    // 2) Lados curvos (papel combado) o esquina tapada: la aproximación tomaría el vértice de la curva
+    //    como esquina. Las esquinas reales son los puntos más extremos en diagonal, medidos en el
+    //    sistema de referencia del rectángulo girado que envuelve la hoja.
+    return diagonalCorners(cv, hull)
+  } finally {
+    hull.delete()
   }
-  hull.delete()
-  return quad
+}
+
+function diagonalCorners(cv, hull) {
+  const r = cv.minAreaRect(hull)
+  const a = (r.angle * Math.PI) / 180
+  const ux = { x: Math.cos(a), y: Math.sin(a) }
+  const uy = { x: -Math.sin(a), y: Math.cos(a) }
+  const hw = r.size.width / 2 || 1
+  const hh = r.size.height / 2 || 1
+  const d = hull.data32S
+  const best = [null, null, null, null]
+  const score = [-Infinity, -Infinity, -Infinity, -Infinity]
+  const signs = [[-1, -1], [1, -1], [1, 1], [-1, 1]]
+  for (let i = 0; i < d.length; i += 2) {
+    const px = d[i] - r.center.x
+    const py = d[i + 1] - r.center.y
+    const lx = (px * ux.x + py * ux.y) / hw
+    const ly = (px * uy.x + py * uy.y) / hh
+    signs.forEach(([sx, sy], k) => {
+      const s = sx * lx + sy * ly
+      if (s > score[k]) {
+        score[k] = s
+        best[k] = { x: d[i], y: d[i + 1] }
+      }
+    })
+  }
+  return best.every(Boolean) && new Set(best.map((p) => `${p.x},${p.y}`)).size === 4 ? best : null
 }
 
 function medianOf(data) {
@@ -245,6 +309,9 @@ function fitLine(pts) {
     }
   }
   const inl = best ? inliers(pts, best.a, best.nx, best.ny) : pts
+  // Si menos de la mitad de los píxeles del borde caen en la recta, el lado está curvado:
+  // mejor no forzar una recta (el aplanado se encarga de la curva)
+  if (inl.length < pts.length * 0.5) return null
   return fitPca(inl.length >= 20 ? inl : pts)
 }
 

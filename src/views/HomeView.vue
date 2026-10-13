@@ -64,6 +64,7 @@ onMounted(load)
     <span>📲 Para no perder tus documentos, añade DocScan a la pantalla de inicio: toca <b>Compartir</b> y luego <b>Añadir a pantalla de inicio</b>. Safari puede borrar los datos de webs que no visitas en 7 días.</span>
     <button class="btn small" @click="closeInstall">✕</button>
   </div>
+  <RouterLink to="/file/search" class="searchbar">🔍 <span>Buscar documentos o texto…</span></RouterLink>
   <section
     :class="['drop', { over: dragOver }]"
     @dragover.prevent="dragOver = true"
@@ -105,6 +106,11 @@ onMounted(load)
 
 <style scoped>
 .install { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; background: var(--accent-soft); border-color: var(--accent); font-size: .9rem; }
+.searchbar {
+  display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 11px 14px; margin-bottom: 14px; color: var(--muted);
+}
+.searchbar:hover { border-color: var(--accent); }
 .drop {
   background: var(--surface); border: 2px dashed var(--border); border-radius: 16px; padding: 28px 20px;
   text-align: center; cursor: pointer; transition: border-color .15s, background .15s;

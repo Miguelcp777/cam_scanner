@@ -4,6 +4,7 @@ const nav = [
   { to: '/file/recent', label: 'Inicio', icon: '🏠' },
   { to: '/file/manager', label: 'Mi documento', icon: '📁' },
   { to: '/sign/home', label: 'Firmar', icon: '✍️' },
+  { to: '/user', label: 'Ajustes', icon: '⚙️' },
 ]
 </script>
 
