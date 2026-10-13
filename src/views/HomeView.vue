@@ -1,8 +1,9 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import DocCard from '../components/DocCard.vue'
-import { listDocs } from '../lib/db'
+import TagFilter from '../components/TagFilter.vue'
+import { listDocs, listTags } from '../lib/db'
 import { isIOS, isStandalone, useImport } from '../lib/util'
 
 const router = useRouter()
@@ -26,6 +27,7 @@ const tools = [
   { to: '/tools/pdftopic', label: 'A Imagen', ico: '🖼️' },
   { to: '/tools/mergepdf', label: 'Combinar archivos', ico: '🧩' },
   { to: '/sign/home', label: 'Firmar', ico: '✍️' },
+  { to: '/scanner', label: 'Carné / DNI', ico: '🪪', query: { camera: 1, mode: 'id' } },
   { to: '/tools/webocr', label: 'Texto (OCR)', ico: '🔤' },
   { to: '/tools/main', label: 'Todas las herramientas', ico: '🧰' },
 ]
@@ -40,8 +42,14 @@ function closeInstall() {
   store.set('installHintClosed', '1')
 }
 
+const tags = ref([])
+const tag = ref('')
+// Sin filtro: los 24 más recientes; con etiqueta: todos los que la llevan
+const shown = computed(() => (tag.value ? docs.value.filter((d) => d.tags?.includes(tag.value)) : docs.value.slice(0, 24)))
+
 async function load() {
-  docs.value = (await listDocs()).slice(0, 24)
+  docs.value = await listDocs()
+  tags.value = await listTags()
 }
 
 async function onFiles(files) {
@@ -98,9 +106,10 @@ onMounted(load)
     <RouterLink to="/file/manager" class="muted">Ver todos los documentos ›</RouterLink>
   </div>
 
+  <TagFilter v-model="tag" :tags="tags" />
   <p v-if="!docs.length" class="muted empty">No hay archivos todavía. Sube uno o escanea para empezar.</p>
   <div v-else :class="mode === 'grid' ? 'doc-grid' : 'doc-list'">
-    <DocCard v-for="d in docs" :key="d.id" :doc="d" :mode="mode" />
+    <DocCard v-for="d in shown" :key="d.id" :doc="d" :mode="mode" />
   </div>
 </template>
 

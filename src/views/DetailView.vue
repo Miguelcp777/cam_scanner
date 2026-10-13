@@ -1,14 +1,15 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import ExportPanel from '../components/ExportPanel.vue'
 import ResultPanel from '../components/ResultPanel.vue'
+import TagEditor from '../components/TagEditor.vue'
 import { TARGETS } from '../lib/convert'
 import { getDoc, listFolders, saveDoc, trashDoc } from '../lib/db'
 import { rotateBlob } from '../lib/scan'
 import { layoutText } from '../lib/layout'
 import { recognize } from '../lib/ocr'
 import { pageLayouts } from '../lib/pages'
-import { docToPdfBlob } from '../lib/pdf'
 import { blobUrl, formatDate } from '../lib/util'
 
 const route = useRoute()
@@ -52,10 +53,12 @@ async function task(label, fn) {
   }
 }
 
-const exportPdf = () =>
-  task('Generando PDF…', async () => {
-    results.value = [{ blob: await docToPdfBlob(doc.value), name: `${doc.value.name}.pdf` }]
-  })
+const showExport = ref(false)
+
+function setTags(tags) {
+  doc.value.tags = tags
+  persist()
+}
 
 // Escaneos: OCR por página. PDF: capa de texto si existe, OCR en páginas escaneadas.
 const runOcr = () =>
@@ -108,12 +111,15 @@ watch(() => route.query.id, load, { immediate: true })
       <input v-model="doc.name" type="text" class="title" @change="persist" />
       <span class="muted">{{ formatDate(doc.updatedAt) }} · {{ doc.pageCount ?? '?' }} pág.</span>
     </div>
+    <TagEditor :model-value="doc.tags || []" class="tagrow" @update:model-value="setTags" />
 
     <div class="row toolbar">
-      <button class="btn primary" :disabled="!!busy" @click="exportPdf">📤 Exportar PDF</button>
+      <button class="btn primary" :disabled="!!busy" @click="showExport = !showExport">📤 Exportar PDF</button>
       <button class="btn" :disabled="!!busy || (isScan && !doc.pages.length)" @click="runOcr">🔤 Extraer texto</button>
       <RouterLink class="btn" :to="{ path: '/sign/detail', query: { id: doc.id } }">✍️ Firmar</RouterLink>
       <RouterLink v-if="isScan" class="btn" :to="{ path: '/scanner', query: { append: doc.id, camera: 1 } }">📷 Escanear más páginas</RouterLink>
+      <RouterLink class="btn" :to="{ path: '/tools/pagesort', query: { id: doc.id } }">🗂 Organizar páginas</RouterLink>
+      <RouterLink class="btn" :to="{ path: '/tools/redaction', query: { id: doc.id } }">⬛ Ocultar datos</RouterLink>
       <RouterLink class="btn" :to="{ path: '/tools/extractpdfpages', query: { id: doc.id } }">✂️ Extraer páginas</RouterLink>
     </div>
     <div class="row toolbar">
@@ -135,6 +141,7 @@ watch(() => route.query.id, load, { immediate: true })
     </div>
     <p v-if="error" class="error">{{ error }}</p>
     <ResultPanel v-if="results" :results="results" @close="results = null" />
+    <ExportPanel v-if="showExport" :doc="doc" @close="showExport = false" />
 
     <div v-if="isScan" class="pages">
       <div v-for="(p, i) in doc.pages" :key="p.id" class="page">
@@ -173,6 +180,7 @@ watch(() => route.query.id, load, { immediate: true })
 .title { font-size: 1.3rem; font-weight: 700; flex: 1; min-width: 200px; border-color: transparent; background: transparent; }
 .title:hover, .title:focus { border-color: var(--border); background: var(--surface); }
 .toolbar { margin-bottom: 10px; }
+.tagrow { margin-bottom: 12px; }
 .busy { margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
 .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; margin-top: 8px; }
 .page { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 6px; }

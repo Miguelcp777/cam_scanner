@@ -8,11 +8,15 @@ export function loadCV() {
   return cvPromise
 }
 
-export async function loadImage(blob) {
-  const img = new Image()
-  img.src = URL.createObjectURL(blob)
-  await img.decode()
-  return img
+// Se espera al evento load (no a img.decode(), que el navegador puede aplazar si la página no está
+// en primer plano y dejaría el procesado colgado)
+export function loadImage(blob) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('No se pudo leer la imagen'))
+    img.src = URL.createObjectURL(blob)
+  })
 }
 
 // Safari/iOS limita la memoria total de canvas: liberar en cuanto no se necesiten.
@@ -479,9 +483,11 @@ function trueAspect(pts, W, H) {
   return isFinite(r) && r > 0 && Math.abs(Math.log(r / naive)) < 0.4 ? r : naive
 }
 
-// Ajusta a A4 o Carta si la proporción está a menos de un 4 %
+// Ajusta a A4, Carta o tarjeta ID-1 (DNI, carné de conducir, tarjetas: 85,6×54 mm) si la proporción
+// está a menos de un 4 %
+export const ID1_RATIO = 85.6 / 53.98
 function snapAspect(r) {
-  for (const p of [1 / Math.SQRT2, 8.5 / 11]) {
+  for (const p of [1 / Math.SQRT2, 8.5 / 11, ID1_RATIO]) {
     for (const t of [p, 1 / p]) if (Math.abs(r / t - 1) < 0.04) return t
   }
   return r

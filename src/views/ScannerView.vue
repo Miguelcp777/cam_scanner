@@ -8,7 +8,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import PageProcessor from '../components/PageProcessor.vue'
 import { createScanDoc, getDoc, saveDoc, uid } from '../lib/db'
-import { autoPage } from '../lib/process'
+import { autoPage, composeIdCard } from '../lib/process'
 import { canvasToBlob, createLiveDetector, loadCV, releaseCanvas, rotateBlob } from '../lib/scan'
 import { blobUrl, defaultScanName, isTouch, pending } from '../lib/util'
 
@@ -39,7 +39,9 @@ const liveQuad = ref(null) // esquinas en coordenadas del vídeo
 const videoSize = ref({ w: 1, h: 1 })
 const stable = ref(0)
 const auto = ref(true)
-const burst = ref(false) // ráfaga: varias páginas seguidas sin salir de la cámara
+// Modo de cámara: una página | ráfaga (varias seguidas) | carné/DNI (anverso + reverso en un A4)
+const mode = ref(route.query.mode === 'id' ? 'id' : 'single')
+const burst = computed(() => mode.value !== 'single') // ráfaga e ID capturan sin salir de la cámara
 const shots = ref([]) // capturas de la ráfaga: [{ blob, hint, url }]
 const flash = ref(false)
 const STABLE_TICKS = 8 // ~1,2 s quieto → foto automática
@@ -50,8 +52,9 @@ let lastSig = null // firma de la última captura (evita repetir la misma hoja e
 
 const livePolygon = computed(() => liveQuad.value?.map((p) => `${p.x},${p.y}`).join(' ') || '')
 const cameraHint = computed(() => {
-  if (!liveQuad.value) return 'Buscando documento… Encuadra la hoja sobre un fondo que contraste.'
-  if (burst.value && lastSig && !isNewPage()) return 'Cambia de hoja para la siguiente página'
+  const side = mode.value === 'id' ? (shots.value.length ? 'REVERSO: ' : 'ANVERSO: ') : ''
+  if (!liveQuad.value) return side + (mode.value === 'id' ? 'encuadra la tarjeta sobre un fondo oscuro' : 'Buscando documento… Encuadra la hoja sobre un fondo que contraste.')
+  if (burst.value && lastSig && !isNewPage()) return mode.value === 'id' ? 'Dale la vuelta a la tarjeta' : 'Cambia de hoja para la siguiente página'
   if (!auto.value) return 'Documento detectado. Pulsa el botón para capturar.'
   return stable.value >= STABLE_TICKS / 2 ? 'Mantén el móvil quieto…' : 'Documento detectado'
 })
@@ -150,6 +153,7 @@ async function capture() {
       flash.value = true
       setTimeout(() => (flash.value = false), 180)
       stable.value = 0
+      if (mode.value === 'id' && shots.value.length >= 2) return finishBurst() // anverso + reverso
       loopTimer = setTimeout(detectLoop, 400)
     } else {
       stopCamera()
@@ -178,7 +182,25 @@ function finishBurst() {
   })
   shots.value = []
   lastSig = null
-  processAll(list)
+  if (mode.value === 'id') processId(list)
+  else processAll(list)
+}
+
+// Carné: cada cara recortada (color original, sin aplanar) y ambas a tamaño real en un A4
+function processId(list) {
+  if (!list.length) return backToList()
+  step.value = 'auto'
+  autoProgress.value = { done: 0, total: list.length }
+  run('', async () => {
+    const sides = []
+    for (const item of list) {
+      sides.push((await autoPage(item.blob, item.hint, { filter: 'original', flatten: false })).blob)
+      autoProgress.value.done++
+    }
+    pages.value.push(await composeIdCard(sides))
+    if (!appendTo.value && name.value.startsWith('Escaneo')) name.value = name.value.replace('Escaneo', 'Carné')
+    step.value = 'review'
+  })
 }
 
 function processAll(list) {
@@ -312,8 +334,9 @@ onBeforeUnmount(() => {
   <!-- Cámara con detección en vivo -->
   <div v-show="step === 'camera'" class="camera">
     <div class="modes">
-      <button :class="['mode', { on: !burst }]" @click="burst = false">Una página</button>
-      <button :class="['mode', { on: burst }]" @click="burst = true">Varias páginas</button>
+      <button :class="['mode', { on: mode === 'single' }]" @click="mode = 'single'">Una página</button>
+      <button :class="['mode', { on: mode === 'burst' }]" @click="mode = 'burst'">Varias páginas</button>
+      <button :class="['mode', { on: mode === 'id' }]" @click="mode = 'id'">🪪 Carné / DNI</button>
     </div>
     <div :class="['viewfinder', { flash }]">
       <video ref="video" autoplay playsinline muted />
@@ -334,7 +357,7 @@ onBeforeUnmount(() => {
     </div>
     <div v-if="burst && shots.length" class="burst">
       <img v-for="(s, i) in shots.slice(-4)" :key="i" :src="s.url" alt="" />
-      <button class="btn primary" @click="finishBurst">Hecho ({{ shots.length }}) ›</button>
+      <button class="btn primary" @click="finishBurst">{{ mode === 'id' ? 'Solo una cara ›' : `Hecho (${shots.length}) ›` }}</button>
     </div>
     <div class="row center">
       <button class="btn small" @click="stopCamera(); imgInput.click()">🖼️ Galería</button>
@@ -414,7 +437,7 @@ onBeforeUnmount(() => {
 .big span { font-size: 1rem; }
 .big:hover { border-color: var(--accent); }
 .center-text { text-align: center; }
-.modes { display: flex; justify-content: center; gap: 4px; margin-bottom: 8px; }
+.modes { display: flex; justify-content: center; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
 .mode { border: 1px solid var(--border); background: var(--surface); padding: 6px 14px; border-radius: 16px; font: inherit; font-size: .9rem; cursor: pointer; }
 .mode.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .viewfinder { position: relative; background: #000; border-radius: 12px; overflow: hidden; }

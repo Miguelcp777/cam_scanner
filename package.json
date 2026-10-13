@@ -11,6 +11,7 @@
     "deploy": "vite build && npx --yes wrangler@4 pages deploy dist --project-name docscan --branch main"
   },
   "dependencies": {
+    "@cantoo/pdf-lib": "^2.11.1",
     "@techstark/opencv-js": "^4.10.0-release.1",
     "docx": "^9.10.0",
     "exceljs": "^4.4.0",

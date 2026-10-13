@@ -1,5 +1,5 @@
 // Almacenamiento local en IndexedDB.
-// doc:    { id, name, kind: 'scan' | 'pdf', folderId, createdAt, updatedAt, deletedAt, pageCount,
+// doc:    { id, name, kind: 'scan' | 'pdf', folderId, tags, createdAt, updatedAt, deletedAt, pageCount,
 //           pages: [page]                                 (kind 'scan')
 //           pdf: Blob, thumb: Blob, text: string          (kind 'pdf') }
 // page:   { id, blob (resultado), width, height, text,
@@ -52,8 +52,16 @@ function plainDoc(doc) {
     pdf: d.pdf ? toRaw(d.pdf) : null,
     thumb: d.thumb ? toRaw(d.thumb) : null,
     text: d.text ?? '',
+    tags: [...new Set((toRaw(d.tags) || []).map((t) => String(t).trim()).filter(Boolean))],
     pages: (toRaw(d.pages) || []).map(plainPage),
   }
+}
+
+// Todas las etiquetas usadas, ordenadas por frecuencia
+export async function listTags() {
+  const count = new Map()
+  for (const d of await listDocs()) for (const t of d.tags || []) count.set(t, (count.get(t) || 0) + 1)
+  return [...count.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t]) => t)
 }
 
 async function allDocs() {

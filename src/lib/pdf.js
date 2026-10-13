@@ -1,6 +1,111 @@
-import { PDFDocument } from 'pdf-lib'
+import { degrees, PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 
 const A4_WIDTH = 595.28 // puntos
+
+// --- Organizar páginas de un PDF: order = [{ index (página original, base 0), rotate (0/90/180/270) }] ---
+export async function rearrangePdf(blob, order) {
+  const src = await PDFDocument.load(await blob.arrayBuffer(), { ignoreEncryption: true })
+  const out = await PDFDocument.create()
+  const pages = await out.copyPages(src, order.map((o) => o.index))
+  pages.forEach((p, i) => {
+    if (order[i].rotate) p.setRotation(degrees((p.getRotation().angle + order[i].rotate) % 360))
+    out.addPage(p)
+  })
+  return new Blob([await out.save()], { type: 'application/pdf' })
+}
+
+// --- Exportar con opciones ---
+export const QUALITIES = {
+  original: { label: 'Original', note: 'máxima calidad' },
+  medium: { label: 'Media', note: 'buena para enviar por correo', side: 1600, q: 0.72 },
+  small: { label: 'Pequeña', note: 'mínimo tamaño (WhatsApp, formularios)', side: 1100, q: 0.58 },
+}
+
+async function recompress(blob, { side, q }) {
+  const { loadImage, canvasToBlob, releaseCanvas } = await import('./scan')
+  const img = await loadImage(blob)
+  const k = Math.min(1, side / Math.max(img.naturalWidth, img.naturalHeight))
+  const c = document.createElement('canvas')
+  c.width = Math.round(img.naturalWidth * k)
+  c.height = Math.round(img.naturalHeight * k)
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
+  URL.revokeObjectURL(img.src)
+  const out = await canvasToBlob(c, 'image/jpeg', q)
+  releaseCanvas(c)
+  return out
+}
+
+// Marca de agua en diagonal, centrada y repetida, semitransparente
+async function addWatermark(bytes, text) {
+  const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true })
+  const font = await pdf.embedFont(StandardFonts.HelveticaBold)
+  const clean = text.replace(/[^\x20-\x7E -ÿ]/g, '').trim() // Helvetica estándar: solo Latin-1
+  if (!clean) return bytes
+  const a = Math.PI / 4
+  for (const page of pdf.getPages()) {
+    const { width, height } = page.getSize()
+    // Tamaño para que el texto en diagonal quepa holgado en el ancho de la página
+    const size = Math.min((width * 0.7) / (font.widthOfTextAtSize(clean, 1) * Math.cos(a)), height / 14)
+    const tw = font.widthOfTextAtSize(clean, size)
+    // Altura que ocupa el texto en diagonal; las repeticiones se reparten sin salirse de la página
+    const ext = tw * Math.sin(a) + size
+    const top = height - ext / 2 - 20
+    const bottom = ext / 2 + 20
+    const ys = top > bottom ? [bottom, (bottom + top) / 2, top] : [height / 2]
+    for (const cy of ys) {
+      const cx = width / 2
+      page.drawText(clean, {
+        x: cx - (tw / 2) * Math.cos(a) + (size / 3) * Math.sin(a),
+        y: cy - (tw / 2) * Math.sin(a) - (size / 3) * Math.cos(a),
+        size,
+        font,
+        color: rgb(0.45, 0.45, 0.45),
+        opacity: 0.22,
+        rotate: degrees(45),
+      })
+    }
+  }
+  return pdf.save()
+}
+
+// Cifrado AES-256 (librería con soporte de cifrado, cargada solo si se usa)
+async function encrypt(bytes, password) {
+  const { PDFDocument: EncPDF } = await import('@cantoo/pdf-lib')
+  const doc = await EncPDF.load(bytes)
+  const owner = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')
+  doc.encrypt({ userPassword: password, ownerPassword: owner, permissions: { printing: 'highResolution', copying: true } })
+  return doc.save()
+}
+
+// options: { quality: 'original'|'medium'|'small', watermark: string, password: string }
+// Devuelve { blob, note } (note explica si no se pudo reducir el tamaño)
+export async function exportPdf(doc, { quality = 'original', watermark = '', password = '' } = {}, onProgress = () => {}) {
+  const qa = QUALITIES[quality]
+  let bytes
+  let note = ''
+  if (qa?.side) {
+    // Escaneos: recomprimir cada página. PDF: se rasterizan sus páginas (el texto deja de ser seleccionable).
+    const { pageImages } = await import('./pages')
+    const blobs = doc.kind === 'scan' ? doc.pages.map((p) => p.blob) : await pageImages(doc, { maxSide: qa.side })
+    const pages = []
+    for (const [i, b] of blobs.entries()) {
+      pages.push({ blob: await recompress(b, qa) })
+      onProgress((i + 1) / blobs.length)
+    }
+    bytes = await scanToPdfBytes(pages)
+    // Un PDF de texto ya es pequeño: convertirlo en imágenes lo agrandaría
+    const original = await docToPdfBytes(doc)
+    if (bytes.byteLength >= original.byteLength) {
+      bytes = original
+      note = 'Este PDF ya ocupa poco (es texto, no imágenes): se mantiene la calidad original.'
+    }
+  } else {
+    bytes = await docToPdfBytes(doc)
+  }
+  if (watermark.trim()) bytes = await addWatermark(bytes, watermark)
+  if (password) bytes = await encrypt(bytes, password)
+  return { blob: new Blob([bytes], { type: 'application/pdf' }), note }
+}
 
 async function scanToPdfBytes(pages) {
   const pdf = await PDFDocument.create()

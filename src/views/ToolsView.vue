@@ -5,6 +5,7 @@ const groups = [
     tools: [
       { to: '/scanner?camera=1', ico: '📷', label: 'Escanear' },
       { to: '/scanner', ico: '🖼️', label: 'Imágenes a PDF' },
+      { to: '/scanner?camera=1&mode=id', ico: '🪪', label: 'Carné / DNI' },
       { to: '/tools/webocr', ico: '🔤', label: 'Imagen a texto (OCR)' },
     ],
   },
@@ -21,7 +22,9 @@ const groups = [
     title: 'Editar PDF',
     tools: [
       { to: '/tools/mergepdf', ico: '🧩', label: 'Combinar archivos' },
+      { to: '/tools/pagesort', ico: '🗂', label: 'Organizar páginas' },
       { to: '/tools/extractpdfpages', ico: '✂️', label: 'Extraer páginas' },
+      { to: '/tools/redaction', ico: '⬛', label: 'Ocultar datos' },
       { to: '/sign/home', ico: '✍️', label: 'Firma electrónica' },
     ],
   },

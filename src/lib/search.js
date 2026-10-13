@@ -26,7 +26,7 @@ export async function searchDocs(query) {
   if (!terms.length) return []
   const out = []
   for (const d of await listDocs()) {
-    const name = normalize(d.name)
+    const name = normalize(`${d.name} ${(d.tags || []).join(' ')}`)
     const text = docText(d)
     const ntext = normalize(text)
     if (!terms.every((t) => name.includes(t) || ntext.includes(t))) continue

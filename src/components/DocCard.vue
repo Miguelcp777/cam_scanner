@@ -17,6 +17,10 @@ const thumb = () => blobUrl(props.doc.kind === 'scan' ? props.doc.pages[0]?.blob
       <div class="muted small">
         {{ formatDate(doc.updatedAt) }}<template v-if="doc.pageCount"> · {{ doc.pageCount }} pág.</template>
       </div>
+      <div v-if="doc.tags?.length" class="tags">
+        <span v-for="t in doc.tags.slice(0, 2)" :key="t" class="tag">🏷 {{ t }}</span>
+        <span v-if="doc.tags.length > 2" class="tag">+{{ doc.tags.length - 2 }}</span>
+      </div>
     </div>
   </RouterLink>
 </template>
@@ -37,4 +41,6 @@ const thumb = () => blobUrl(props.doc.kind === 'scan' ? props.doc.pages[0]?.blob
 .list .meta { padding: 0; }
 .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .small { font-size: .8rem; }
+.tags { display: flex; gap: 4px; margin-top: 4px; overflow: hidden; }
+.tag { background: var(--accent-soft); color: var(--accent-dark); border-radius: 10px; padding: 1px 7px; font-size: .7rem; white-space: nowrap; }
 </style>

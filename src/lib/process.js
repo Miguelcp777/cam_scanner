@@ -71,12 +71,12 @@ export async function canvasToPage(out) {
 }
 
 // Página completa sin intervención (modo ráfaga e importación de varias imágenes)
-export async function autoPage(blob, hint = null) {
+export async function autoPage(blob, hint = null, { filter = DEFAULT_FILTER, flatten = DEFAULT_FLATTEN } = {}) {
   const { canvas, original } = await loadSource(blob)
   try {
     const { points, detected } = await findCorners(canvas, hint)
-    const { warped, points: pts } = await cropPage(canvas, points, { snap: detected })
-    const out = await renderPage(warped)
+    const { warped, points: pts } = await cropPage(canvas, points, { snap: detected, flatten })
+    const out = await renderPage(warped, filter)
     releaseCanvas(warped)
     const page = {
       id: uid(),
@@ -84,8 +84,8 @@ export async function autoPage(blob, hint = null) {
       text: '',
       original,
       points: pts,
-      filter: DEFAULT_FILTER,
-      flatten: DEFAULT_FLATTEN,
+      filter,
+      flatten,
       rotation: 0,
       detected,
     }
@@ -94,4 +94,46 @@ export async function autoPage(blob, hint = null) {
   } finally {
     releaseCanvas(canvas)
   }
+}
+
+// Carné / DNI: anverso y reverso (ya recortados) a tamaño real sobre un A4 a 300 ppp
+export async function composeIdCard(sides) {
+  const { loadImage } = await import('./scan')
+  const W = 2480, H = 3508 // A4 a 300 ppp
+  const cardW = Math.round((W * 85.6) / 210)
+  const cardH = Math.round((cardW * 53.98) / 85.6)
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  const x = c.getContext('2d')
+  x.fillStyle = '#fff'
+  x.fillRect(0, 0, W, H)
+  const gap = 260
+  let y = Math.round((H - (sides.length * cardH + (sides.length - 1) * gap)) / 3) // algo por encima del centro
+  for (const blob of sides) {
+    const img = await loadImage(blob)
+    let src = img
+    let tmp = null
+    if (img.naturalHeight > img.naturalWidth) {
+      // Tarjeta fotografiada en vertical: se pone apaisada
+      tmp = document.createElement('canvas')
+      tmp.width = img.naturalWidth
+      tmp.height = img.naturalHeight
+      tmp.getContext('2d').drawImage(img, 0, 0)
+      src = rotateCanvas(tmp, 90)
+    }
+    x.drawImage(src, (W - cardW) / 2, y, cardW, cardH)
+    x.strokeStyle = '#d0d0d0'
+    x.lineWidth = 2
+    x.strokeRect((W - cardW) / 2, y, cardW, cardH)
+    URL.revokeObjectURL(img.src)
+    if (tmp) {
+      releaseCanvas(src)
+      releaseCanvas(tmp)
+    }
+    y += cardH + gap
+  }
+  const page = { id: uid(), ...(await canvasToPage(c)), text: '', rotation: 0 }
+  releaseCanvas(c)
+  return page
 }

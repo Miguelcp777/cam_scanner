@@ -3,7 +3,8 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DocCard from '../components/DocCard.vue'
-import { createFolder, deleteFolder, listDocs, listFolders, saveFolder } from '../lib/db'
+import TagFilter from '../components/TagFilter.vue'
+import { createFolder, deleteFolder, listDocs, listFolders, listTags, saveFolder } from '../lib/db'
 import { useImport } from '../lib/util'
 
 const route = useRoute()
@@ -13,9 +14,14 @@ const docs = ref([])
 const folders = ref([])
 const input = ref(null)
 
+const tags = ref([])
+const tag = ref('')
 const current = computed(() => route.query.path || null)
-const subfolders = computed(() => folders.value.filter((f) => (f.parentId ?? null) === current.value))
-const here = computed(() => docs.value.filter((d) => (d.folderId ?? null) === current.value))
+const subfolders = computed(() => (tag.value ? [] : folders.value.filter((f) => (f.parentId ?? null) === current.value)))
+// Con una etiqueta activa se muestran todos los documentos que la llevan, estén en la carpeta que estén
+const here = computed(() =>
+  tag.value ? docs.value.filter((d) => d.tags?.includes(tag.value)) : docs.value.filter((d) => (d.folderId ?? null) === current.value),
+)
 const crumbs = computed(() => {
   const out = []
   let id = current.value
@@ -29,7 +35,7 @@ const crumbs = computed(() => {
 })
 
 async function load() {
-  ;[docs.value, folders.value] = await Promise.all([listDocs(), listFolders()])
+  ;[docs.value, folders.value, tags.value] = await Promise.all([listDocs(), listFolders(), listTags()])
 }
 
 const open = (id) => router.push({ path: '/file/manager', query: id ? { path: id } : {} })
@@ -77,6 +83,7 @@ watch(current, load, { immediate: true })
     <input ref="input" type="file" accept="image/*,application/pdf" multiple hidden @change="onFiles($event.target.files)" />
   </div>
 
+  <TagFilter v-model="tag" :tags="tags" />
   <div v-if="subfolders.length" class="folders">
     <div v-for="f in subfolders" :key="f.id" class="folder" @click="open(f.id)">
       <span class="fico">📁</span>
