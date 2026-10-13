@@ -113,7 +113,7 @@ watch(() => route.query.id, load, { immediate: true })
       <button class="btn primary" :disabled="!!busy" @click="exportPdf">📤 Exportar PDF</button>
       <button class="btn" :disabled="!!busy || (isScan && !doc.pages.length)" @click="runOcr">🔤 Extraer texto</button>
       <RouterLink class="btn" :to="{ path: '/sign/detail', query: { id: doc.id } }">✍️ Firmar</RouterLink>
-      <RouterLink v-if="isScan" class="btn" :to="{ path: '/scanner', query: { append: doc.id } }">➕ Páginas</RouterLink>
+      <RouterLink v-if="isScan" class="btn" :to="{ path: '/scanner', query: { append: doc.id, camera: 1 } }">📷 Escanear más páginas</RouterLink>
       <RouterLink class="btn" :to="{ path: '/tools/extractpdfpages', query: { id: doc.id } }">✂️ Extraer páginas</RouterLink>
     </div>
     <div class="row toolbar">
@@ -143,8 +143,8 @@ watch(() => route.query.id, load, { immediate: true })
           <span class="muted">{{ i + 1 }}</span>
           <span v-if="p.text" class="muted" title="Texto reconocido">🔤</span>
           <span class="spacer" />
-          <RouterLink class="btn small" title="Editar recorte, filtro y giro" :to="{ path: '/file/page', query: { doc: doc.id, page: p.id } }">✏️</RouterLink>
-          <button class="btn small" title="Girar 90°" :disabled="!!busy" @click="rotatePage(i)">↻</button>
+          <RouterLink class="btn small" title="Editar recorte, filtro y giro" :to="{ path: '/file/page', query: { doc: doc.id, page: p.id } }">✏️ Editar</RouterLink>
+          <button class="btn small" title="Girar 90°" :disabled="!!busy" @click="rotatePage(i)">↻ Girar</button>
           <button class="btn small" :disabled="i === 0" @click="movePage(i, -1)">◀</button>
           <button class="btn small" :disabled="i === doc.pages.length - 1" @click="movePage(i, 1)">▶</button>
           <button class="btn small danger" @click="removePage(i)">🗑</button>

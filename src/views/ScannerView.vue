@@ -382,8 +382,8 @@ onBeforeUnmount(() => {
         <div class="row">
           <span class="muted">{{ i + 1 }}</span>
           <span class="spacer" />
-          <button class="btn small" title="Editar" @click="editing = i; step = 'edit'">✏️</button>
-          <button class="btn small" title="Girar" @click="quickRotate(i)">↻</button>
+          <button class="btn small" title="Editar" @click="editing = i; step = 'edit'">✏️ Editar</button>
+          <button class="btn small" title="Girar" @click="quickRotate(i)">↻ Girar</button>
           <button class="btn small" :disabled="i === 0" @click="movePage(i, -1)">◀</button>
           <button class="btn small" :disabled="i === pages.length - 1" @click="movePage(i, 1)">▶</button>
           <button class="btn small danger" @click="pages.splice(i, 1)">🗑</button>

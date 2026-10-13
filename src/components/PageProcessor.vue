@@ -146,7 +146,7 @@ onBeforeUnmount(() => {
         <button v-for="f in FILTERS" :key="f.id" :class="['btn', { primary: filter === f.id }]" :disabled="!!busy" @click="setFilter(f.id)">
           {{ f.label }}
         </button>
-        <button class="btn" title="Girar a la derecha" :disabled="!!busy" @click="rotate(90)">↻</button>
+        <button class="btn" title="Girar a la derecha" :disabled="!!busy" @click="rotate(90)">↻ Girar</button>
       </div>
       <div class="row center flat">
         <label><input v-model="flatten" type="checkbox" :disabled="!!busy" @change="toggleFlatten" /> Aplanar curvatura</label>
