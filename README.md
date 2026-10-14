@@ -60,7 +60,9 @@ modo sin conexión requieren HTTPS real**, es decir, publicar la app (Cloudflare
    no está segura, se usa el método clásico (`findQuad`). En ambos casos se afina cada lado con rectas robustas
    (`refineQuad`). Se puede elegir el motor en Ajustes.
 2. Ajuste final al papel exacto (`snapToPaper`) y proporción real con corrección de perspectiva.
-3. Aplanado de papel curvado (`flattenDocument`): bordes curvos → parche de Coons; después, con los fragmentos de texto
+3. Aplanado de papel curvado (`flattenDocument`): por defecto con IA, el modelo [UVDoc](https://github.com/tanguymagne/UVDoc)
+   (MIT, pesos en media precisión, 15 MB) predice una malla de 45×31 puntos que desdobla la hoja. Modo clásico (o si la IA
+   falla): bordes curvos → parche de Coons. En ambos casos, después, con los fragmentos de texto
    (palabras, columnas de tique, separadores) se calcula una base suave de inclinación y una corrección por renglón, que
    endereza también esquinas levantadas y dobleces locales.
 4. Filtro *Documento*: iluminación uniforme, restos de fondo en los bordes eliminados, niveles adaptativos.
@@ -77,7 +79,7 @@ DocScan no usa su servicio: reproduce la técnica (red neuronal de detección de
 
 - Conversiones heurísticas: no conservan fuentes, colores ni imágenes incrustadas (Word/Excel); PPT usa la página como imagen.
 - Firma: no contempla páginas PDF rotadas ni con CropBox distinto de MediaBox. Es una firma visual, no una firma digital certificada.
-- Primera carga de la app instalada: ~14 MB en caché (OpenCV, pdf.js, conversores) para funcionar sin conexión.
+- Primera carga de la app instalada: ~50 MB en caché (OpenCV, pdf.js, conversores, ONNX Runtime y los dos modelos de IA) para funcionar sin conexión.
 
 ## Pendiente
 

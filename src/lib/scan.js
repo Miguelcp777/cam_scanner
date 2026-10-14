@@ -1079,10 +1079,88 @@ function straightenLines(cv, mat) {
   })
 }
 
-// Devuelve { canvas, edges, lines } o null si el papel no está curvado (usar el recorte normal).
-export async function flattenDocument(img, pts) {
+// --- Motor de aplanado ---
+// 'ai': red UVDoc (malla de 45×31 puntos) + enderezado fino de renglones; si falla, el clásico
+// 'classic': bordes (Coons) + renglones, sin IA
+export const FLATTEN_ENGINES = { ai: 'IA (UVDoc)', classic: 'Clásico (sin IA)' }
+
+export function flattenEngine() {
+  try {
+    return localStorage.getItem('flattenEngine') || 'ai'
+  } catch {
+    return 'ai'
+  }
+}
+
+export function setFlattenEngine(engine) {
+  try {
+    localStorage.setItem('flattenEngine', engine)
+  } catch {}
+}
+
+// La malla de la IA debe cubrir buena parte del papel y no plegarse sobre sí misma
+function plausibleGrid({ gx, gy, cols, rows }, w, h) {
+  const q = [0, cols - 1, rows * cols - 1, (rows - 1) * cols].map((i) => ({ x: gx[i], y: gy[i] }))
+  const area = polygonArea(q)
+  if (area < w * h * 0.5 || area > w * h * 1.6) return false
+  let bad = 0
+  for (let r = 0; r < rows; r++) for (let c = 1; c < cols; c++) if (gx[r * cols + c] <= gx[r * cols + c - 1]) bad++
+  for (let r = 1; r < rows; r++) for (let c = 0; c < cols; c++) if (gy[r * cols + c] <= gy[(r - 1) * cols + c]) bad++
+  return bad < rows * cols * 0.02
+}
+
+// Aplanado con IA sobre el recorte con perspectiva corregida (con margen para que la red vea los bordes)
+async function aiFlatten(cv, img, pts, w, h) {
+  const { aiDewarpGrid } = await import('./aiDetect')
+  const pad = Math.round(Math.max(w, h) * 0.06)
+  const padded = warpToMat(cv, img, pts, w, h, pad)
+  let mat = null
+  try {
+    const input = document.createElement('canvas')
+    cv.imshow(input, padded)
+    const grid = await aiDewarpGrid(input)
+    releaseCanvas(input)
+    if (!plausibleGrid(grid, w, h)) return null
+    const { gx, gy, cols, rows } = grid
+    // Malla → mapas de remapeo (interpolación bilineal entre los puntos de la malla)
+    mat = remapStrips(cv, padded, w, h, (y, mx, my) => {
+      const v = (y / (h - 1)) * (rows - 1)
+      const r = Math.min(rows - 2, Math.floor(v)), fy = v - r
+      for (let x = 0; x < w; x++) {
+        const u = (x / (w - 1)) * (cols - 1)
+        const c = Math.min(cols - 2, Math.floor(u)), fx = u - c
+        const i = r * cols + c, j = i + cols
+        mx[x] = (gx[i] * (1 - fx) + gx[i + 1] * fx) * (1 - fy) + (gx[j] * (1 - fx) + gx[j + 1] * fx) * fy
+        my[x] = (gy[i] * (1 - fx) + gy[i + 1] * fx) * (1 - fy) + (gy[j] * (1 - fx) + gy[j + 1] * fx) * fy
+      }
+    })
+    // Ajuste fino: lo que quede torcido en los renglones
+    const straight = straightenLines(cv, mat)
+    if (straight) {
+      mat.delete()
+      mat = straight
+    }
+    const canvas = document.createElement('canvas')
+    cv.imshow(canvas, mat)
+    return { canvas, edges: false, lines: !!straight, ai: true }
+  } finally {
+    padded.delete()
+    mat?.delete()
+  }
+}
+
+// Devuelve { canvas, edges, lines, ai } o null si el papel no está curvado (usar el recorte normal).
+export async function flattenDocument(img, pts, { engine = flattenEngine() } = {}) {
   const { cv } = await loadCV()
   const { w, h } = targetSize(img, pts)
+  if (engine === 'ai') {
+    try {
+      const r = await aiFlatten(cv, img, pts, w, h)
+      if (r) return r
+    } catch (e) {
+      console.warn('Aplanado con IA no disponible; se usa el clásico', e)
+    }
+  }
   const pad = Math.round(Math.max(w, h) * 0.05)
   const padded = warpToMat(cv, img, pts, w, h, pad)
   let mat = null

@@ -52,7 +52,7 @@ export async function cropPage(canvas, points, { snap = false, flatten = DEFAULT
     if (f) {
       releaseCanvas(warped)
       warped = f.canvas
-      flattened = [f.edges && 'bordes', f.lines && 'renglones'].filter(Boolean).join(' y ')
+      flattened = f.ai ? 'con IA' : [f.edges && 'bordes', f.lines && 'renglones'].filter(Boolean).join(' y ')
     }
   }
   return { warped, points: pts, flattened }

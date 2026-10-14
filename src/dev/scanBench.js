@@ -321,7 +321,7 @@ export const FLATTEN_CASES = {
   'Tique plano (control)': { receipt: true, ratio: 0.33, tiltX: 0.3 },
 }
 
-export async function runFlattenBench(cases = FLATTEN_CASES) {
+export async function runFlattenBench(cases = FLATTEN_CASES, { engine } = {}) {
   const { cv } = await loadCV()
   const rows = []
   for (const [name, cfg] of Object.entries(cases)) {
@@ -333,7 +333,7 @@ export async function runFlattenBench(cases = FLATTEN_CASES) {
     }
     const { canvas: plain, points } = await warpDocument(canvas, pts)
     const t0 = performance.now()
-    const fl = await flattenDocument(canvas, points)
+    const fl = await flattenDocument(canvas, points, engine ? { engine } : undefined)
     const ms = Math.round(performance.now() - t0)
     const before = misalignment(cv, plain)
     const after = fl ? misalignment(cv, fl.canvas) : before
@@ -343,7 +343,7 @@ export async function runFlattenBench(cases = FLATTEN_CASES) {
       desalineado_antes: +before.max.toFixed(1),
       desalineado_despues: +after.max.toFixed(1),
       media_despues: +after.mean.toFixed(1),
-      aplicado: fl ? [fl.edges && 'bordes', fl.lines && 'renglones'].filter(Boolean).join('+') : 'no',
+      aplicado: fl?.ai ? 'IA' + (fl.lines ? '+renglones' : '') : fl ? [fl.edges && 'bordes', fl.lines && 'renglones'].filter(Boolean).join('+') : 'no',
       ms,
     })
     ;[plain, canvas, fl?.canvas].forEach(releaseCanvas)
@@ -352,11 +352,11 @@ export async function runFlattenBench(cases = FLATTEN_CASES) {
 }
 
 // Imagen de un caso de aplanado (para revisar a ojo): { foto, recorte, aplanado } como data URL
-export async function flattenSample(cfg) {
+export async function flattenSample(cfg, engine) {
   const { canvas } = await photo(cfg)
   const pts = await detectCorners(canvas)
   const { canvas: plain, points } = await warpDocument(canvas, pts)
-  const fl = await flattenDocument(canvas, points)
+  const fl = await flattenDocument(canvas, points, engine ? { engine } : undefined)
   const url = (c) => c.toDataURL('image/jpeg', 0.8)
   return { foto: url(canvas), recorte: url(plain), aplanado: fl ? url(fl.canvas) : null }
 }

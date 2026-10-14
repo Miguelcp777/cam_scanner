@@ -27,7 +27,7 @@ export default defineConfig(({ mode }) => ({
         ],
       },
       workbox: {
-        // onnx: modelo de IA de detección de bordes (4,8 MB); wasm: OpenCV y ONNX Runtime (~14 MB)
+        // onnx: modelos de IA de detección de bordes (4,8 MB) y aplanado (15 MB); wasm: OpenCV y ONNX Runtime (~14 MB)
         globPatterns: ['**/*.{js,mjs,css,html,png,svg,wasm,onnx}'],
         maximumFileSizeToCacheInBytes: 16 * 1024 * 1024,
         navigateFallback: '/index.html',
