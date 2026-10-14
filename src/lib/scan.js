@@ -628,8 +628,9 @@ export async function warpDocument(img, pts) {
 // Aplanado de papel curvado (tiques enrollados, hojas dobladas, páginas de libro)
 //  1) Bordes: tras enderezar la perspectiva (con margen), cada borde del papel se ajusta a una curva
 //     y una interpolación de Coons lleva esa región curva a un rectángulo.
-//  2) Renglones: se detectan las líneas de texto, se ajusta su curvatura y se desplaza cada columna
-//     en vertical para que vuelvan a ser horizontales (corrige la curvatura interior).
+//  2) Renglones: con los fragmentos de texto se calcula cuánto sube o baja cada punto (base suave +
+//     corrección por renglón) y se desplaza cada columna para que vuelvan a ser horizontales
+//     (curvatura interior, esquinas levantadas y dobleces locales).
 // ---------------------------------------------------------------------------------------------
 
 function solve3(m, v) {
@@ -763,12 +764,50 @@ function coonsRemap(cv, padded, pad, w, h, f) {
   })
 }
 
-// Renglones de texto: cada uno con su parábola y(x) y su altura media y0 (coordenadas de `mat`).
-function findTextLines(cv, mat) {
+// --- Campo de inclinación del texto -----------------------------------------------------------
+// Los tiques y muchos documentos no tienen renglones largos (líneas cortas centradas, columnas
+// etiqueta/valor, separadores de guiones). Se trabaja con fragmentos de texto (palabras o grupos de
+// palabras): sus pendientes dan un campo suave para toda la página y, unidos en renglones, permiten
+// corregir además las dobleces locales que afectan solo a dos o tres renglones.
+
+// Suavidad de la rejilla de pendientes (más alto = más rígida)
+const SLOPE_SMOOTH = 0.3
+
+// Sistema lineal denso n×n (eliminación gaussiana con pivote parcial); A se modifica
+function solveDense(A, b, n) {
+  for (let c = 0; c < n; c++) {
+    let p = c
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r * n + c]) > Math.abs(A[p * n + c])) p = r
+    if (Math.abs(A[p * n + c]) < 1e-12) return null
+    if (p !== c) {
+      for (let j = 0; j < n; j++) [A[c * n + j], A[p * n + j]] = [A[p * n + j], A[c * n + j]]
+      ;[b[c], b[p]] = [b[p], b[c]]
+    }
+    for (let r = c + 1; r < n; r++) {
+      const f = A[r * n + c] / A[c * n + c]
+      if (!f) continue
+      for (let j = c; j < n; j++) A[r * n + j] -= f * A[c * n + j]
+      b[r] -= f * b[c]
+    }
+  }
+  const x = new Float64Array(n)
+  for (let r = n - 1; r >= 0; r--) {
+    let v = b[r]
+    for (let j = r + 1; j < n; j++) v -= A[r * n + j] * x[j]
+    x[r] = v / A[r * n + r]
+  }
+  return x
+}
+
+// Fragmentos de texto (palabras o grupos de palabras) con su línea central suavizada, en coordenadas
+// de `mat`: { frags: [{ xs, ys }], ch } (ch = altura típica de letra). La línea central sigue las
+// dobleces del papel (no se fuerza a recta ni a parábola).
+function textFragments(cv, mat) {
   const W = mat.cols, H = mat.rows
   const s = Math.min(1, 1400 / Math.max(W, H))
   const small = new cv.Mat()
   const bin = new cv.Mat()
+  const joined = new cv.Mat()
   const labels = new cv.Mat()
   const stats = new cv.Mat()
   const cents = new cv.Mat()
@@ -777,72 +816,265 @@ function findTextLines(cv, mat) {
     cv.cvtColor(small, small, cv.COLOR_RGBA2GRAY)
     cv.adaptiveThreshold(small, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 25, 15)
     const Ws = bin.cols, Hs = bin.rows
-    // Une las letras de cada renglón con un trazo horizontal
-    const kx = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(Math.max(9, Math.round(Ws * 0.025)), 1))
-    cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kx)
-    kx.delete()
-    const n = cv.connectedComponentsWithStats(bin, labels, stats, cents, 8, cv.CV_32S)
-    const st = stats.data32S, lab = labels.data32S
-    const lines = []
+    // Altura típica de las letras
+    let n = cv.connectedComponentsWithStats(bin, labels, stats, cents, 8, cv.CV_32S)
+    let st = stats.data32S
+    const hs = []
+    for (let i = 1; i < n; i++) {
+      const bw = st[i * 5 + 2], bh = st[i * 5 + 3]
+      if (bh >= 4 && bh < Hs * 0.06 && bw < bh * 2.5) hs.push(bh)
+    }
+    if (hs.length < 20) return { frags: [], ch: 0 }
+    hs.sort((a, b) => a - b)
+    const ch = hs[Math.floor(hs.length / 2)]
+    // Une las letras de cada palabra (y palabras cercanas) sin mezclar renglones
+    const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(Math.max(3, Math.round(ch * 1.1)), 1))
+    cv.morphologyEx(bin, joined, cv.MORPH_CLOSE, k)
+    k.delete()
+    n = cv.connectedComponentsWithStats(joined, labels, stats, cents, 8, cv.CV_32S)
+    st = stats.data32S
+    const lab = labels.data32S
+    const frags = []
+    const half = Math.max(2, Math.round(ch)) // media ventana de suavizado (px)
+    const step = Math.max(2, Math.round(ch / 2))
     for (let i = 1; i < n; i++) {
       const bx = st[i * 5], by = st[i * 5 + 1], bw = st[i * 5 + 2], bh = st[i * 5 + 3]
-      // Un renglón curvado ocupa mucha altura total, pero su trazo es fino en cada columna
-      if (bw < Ws * 0.3 || bh > Hs * 0.25 || bh < 3) continue
-      const xs = [], ys = []
-      let thick = 0
-      for (let x = bx; x < bx + bw; x += 3) {
+      if (bw < ch * 3 || bh > ch * 2.5 + bw * 0.3 || bh > Hs * 0.15) continue
+      // Centro vertical de la tinta en cada columna
+      const cy = new Float32Array(bw).fill(NaN)
+      let thick = 0, cols = 0
+      for (let x = bx; x < bx + bw; x++) {
         let sum = 0, cnt = 0
         for (let y = by; y < by + bh; y++) if (lab[y * Ws + x] === i) { sum += y; cnt++ }
-        if (cnt) { xs.push(x / s); ys.push(sum / cnt / s); thick += cnt }
+        if (cnt) { cy[x - bx] = sum / cnt; thick += cnt; cols++ }
       }
-      if (!xs.length || thick / xs.length > Math.max(4, Hs * 0.035)) continue // bloque de varias líneas, no un renglón
-      const fit = robustFit(xs, ys, 8)
-      if (!fit || fit.rms > Math.max(2, (thick / xs.length / s) * 0.6)) continue
-      const x0 = bx / s, x1 = (bx + bw) / s
-      let y0 = 0
-      for (let k = 0; k <= 10; k++) y0 += evalPoly(fit.c, x0 + ((x1 - x0) * k) / 10)
-      lines.push({ c: fit.c, y0: y0 / 11, x0, x1 })
+      if (cols < 6 || thick / cols > ch * 1.8) continue // bloque de varias líneas o imagen
+      // Media móvil (ignora columnas vacías): quita la forma de cada letra y conserva las dobleces
+      const sm = new Float32Array(bw)
+      let err = 0
+      for (let x = 0; x < bw; x++) {
+        let sum = 0, cnt = 0
+        for (let j = Math.max(0, x - half); j <= Math.min(bw - 1, x + half); j++) if (!Number.isNaN(cy[j])) { sum += cy[j]; cnt++ }
+        sm[x] = cnt ? sum / cnt : NaN
+        if (!Number.isNaN(cy[x])) err += (cy[x] - sm[x]) ** 2
+      }
+      if (Math.sqrt(err / cols) > ch * 0.4) continue // no es un renglón limpio
+      const xs = [], ys = []
+      for (let x = Math.min(half, bw - 1); x < bw; x += step) {
+        if (!Number.isNaN(sm[x])) { xs.push((bx + x) / s); ys.push(sm[x] / s) }
+      }
+      if (xs.length >= 2) frags.push({ xs, ys })
     }
-    return lines.sort((a, b) => a.y0 - b.y0)
+    return { frags, ch: ch / s }
   } finally {
-    ;[small, bin, labels, stats, cents].forEach((m) => m.delete())
+    ;[small, bin, joined, labels, stats, cents].forEach((m) => m.delete())
   }
 }
 
-// Desplazamiento vertical de cada renglón respecto a su altura media, por columna
-function lineProfiles(lines, w) {
-  return lines.map((l) => {
-    const d = new Float32Array(w)
-    for (let x = 0; x < w; x++) d[x] = evalPoly(l.c, Math.min(l.x1, Math.max(l.x0, x))) - l.y0
-    return { y0: l.y0, d }
-  })
+// Interpolación bilineal en una rejilla gw×gh que cubre una imagen W×H
+function gridSampler(D, gw, gh, W, H) {
+  const sx = (gw - 1) / (W - 1), sy = (gh - 1) / (H - 1)
+  return (x, y) => {
+    const gx = Math.min(gw - 1.001, Math.max(0, x * sx)), gy = Math.min(gh - 1.001, Math.max(0, y * sy))
+    const ix = Math.floor(gx), iy = Math.floor(gy), fx = gx - ix, fy = gy - iy
+    const i = iy * gw + ix
+    return (D[i] * (1 - fx) + D[i + 1] * fx) * (1 - fy) + (D[i + gw] * (1 - fx) + D[i + gw + 1] * fx) * fy
+  }
 }
 
-const maxAbs = (arr) => arr.reduce((m, v) => Math.max(m, Math.abs(v)), 0)
+// 1) Base suave: rejilla flexible de pendientes dy/dx (interpolación bilineal) ajustada a todos los
+//    fragmentos, con suavidad de segundo orden; integrada en horizontal desde la columna central.
+//    Recoge la curvatura general, la inclinación residual y las zonas levantadas.
+function smoothDisplacement(frags, W, H) {
+  const samples = []
+  for (const f of frags) {
+    for (let k = 0; k < f.xs.length; k++) {
+      const a = Math.max(0, k - 1), b = Math.min(f.xs.length - 1, k + 1)
+      if (b > a) samples.push({ x: f.xs[k], y: f.ys[k], s: (f.ys[b] - f.ys[a]) / (f.xs[b] - f.xs[a]) })
+    }
+  }
+  if (samples.length < 40) return null
+  const cell = Math.min(W, H) / 5
+  const nx = Math.min(12, Math.max(3, Math.round(W / cell) + 1))
+  const ny = Math.min(16, Math.max(3, Math.round(H / cell) + 1))
+  const n = nx * ny
+  const fx = (nx - 1) / (W - 1), fy = (ny - 1) / (H - 1)
+  const cellOf = (x, y) => {
+    const gx = Math.min(nx - 1.001, Math.max(0, x * fx)), gy = Math.min(ny - 1.001, Math.max(0, y * fy))
+    const ix = Math.floor(gx), iy = Math.floor(gy), tx = gx - ix, ty = gy - iy, i = iy * nx + ix
+    return [[i, (1 - tx) * (1 - ty)], [i + 1, tx * (1 - ty)], [i + nx, (1 - tx) * ty], [i + nx + 1, tx * ty]]
+  }
+  const cells = samples.map((p) => cellOf(p.x, p.y))
+  const lambda = (SLOPE_SMOOTH * samples.length) / n
+  let ws = samples.map(() => 1)
+  let t = null
+  for (let it = 0; it < 3; it++) {
+    const A = new Float64Array(n * n), rhs = new Float64Array(n)
+    cells.forEach((cs, k) => {
+      if (!ws[k]) return
+      for (const [i, wi] of cs) {
+        rhs[i] += wi * samples[k].s
+        for (const [j, wj] of cs) A[i * n + j] += wi * wj
+      }
+    })
+    // Penaliza la segunda diferencia (curvatura del campo): las variaciones lineales salen gratis.
+    // Un término de primer orden muy débil estabiliza las zonas sin texto.
+    const penalize = (idx, coefs, l) => {
+      for (let a = 0; a < idx.length; a++) for (let b = 0; b < idx.length; b++) A[idx[a] * n + idx[b]] += l * coefs[a] * coefs[b]
+    }
+    for (let iy = 0; iy < ny; iy++) for (let ix = 0; ix < nx; ix++) {
+      const i = iy * nx + ix
+      if (ix + 2 < nx) penalize([i, i + 1, i + 2], [1, -2, 1], lambda)
+      if (iy + 2 < ny) penalize([i, i + nx, i + 2 * nx], [1, -2, 1], lambda)
+      if (ix + 1 < nx) penalize([i, i + 1], [1, -1], lambda * 0.02)
+      if (iy + 1 < ny) penalize([i, i + nx], [1, -1], lambda * 0.02)
+      A[i * n + i] += 1e-6
+    }
+    t = solveDense(A, rhs, n)
+    if (!t) return null
+    const res = cells.map((cs, k) => Math.abs(samples[k].s - cs.reduce((a, [i, w]) => a + w * t[i], 0)))
+    const med = [...res].sort((a, b) => a - b)[Math.floor(res.length / 2)]
+    ws = res.map((r) => (r <= Math.max(0.004, 3 * med) ? 1 : 0)) // descarta fragmentos atípicos
+  }
+  const slope = (x, y) => cellOf(x, y).reduce((a, [i, w]) => a + w * t[i], 0)
+  const gw = 64, gh = 64
+  const D = new Float32Array(gw * gh)
+  const c0 = Math.floor((gw - 1) / 2)
+  const dx = (W - 1) / (gw - 1)
+  for (let gy = 0; gy < gh; gy++) {
+    const y = (gy * (H - 1)) / (gh - 1)
+    const sl = Array.from({ length: gw }, (_, gx) => slope(gx * dx, y))
+    let acc = 0
+    for (let gx = c0 + 1; gx < gw; gx++) D[gy * gw + gx] = acc += ((sl[gx - 1] + sl[gx]) / 2) * dx
+    acc = 0
+    for (let gx = c0 - 1; gx >= 0; gx--) D[gy * gw + gx] = acc -= ((sl[gx + 1] + sl[gx]) / 2) * dx
+  }
+  return { at: gridSampler(D, gw, gh, W, H), slope }
+}
 
-// Curvatura residual de los renglones en px (para medir y decidir si hace falta aplanar)
-export function measureLineCurvature(cv, mat) {
-  const lines = findTextLines(cv, mat)
-  if (lines.length < 3) return { lines: lines.length, max: 0 }
-  const prof = lineProfiles(lines, mat.cols).map((p) => maxAbs(p.d)).sort((a, b) => a - b)
-  return { lines: lines.length, max: prof[Math.floor(prof.length * 0.8)] } // percentil 80: ignora renglones raros
+// Agrupa los fragmentos en renglones: de izquierda a derecha, cada fragmento continúa el renglón cuya
+// prolongación (según la pendiente de la base) pasa más cerca de su inicio. Así se unen las columnas
+// separadas de un tique ("Matrícula: … 7397NKT") y las palabras de un renglón con huecos.
+function groupLines(frags, slope, ch) {
+  const lines = []
+  for (const f of [...frags].sort((a, b) => a.xs[0] - b.xs[0])) {
+    const x0 = f.xs[0], y0 = f.ys[0]
+    let best = null, bestDiff = ch * 0.6
+    for (const L of lines) {
+      const lx = L.xs[L.xs.length - 1], ly = L.ys[L.ys.length - 1]
+      if (lx > x0 + ch) continue
+      const pred = ly + slope((lx + x0) / 2, ly) * (x0 - lx)
+      const diff = Math.abs(pred - y0)
+      if (diff < bestDiff) { bestDiff = diff; best = L }
+    }
+    if (best) {
+      for (let k = 0; k < f.xs.length; k++) if (f.xs[k] > best.xs[best.xs.length - 1]) { best.xs.push(f.xs[k]); best.ys.push(f.ys[k]) }
+    } else {
+      lines.push({ xs: [...f.xs], ys: [...f.ys] })
+    }
+  }
+  return lines
+}
+
+// Desplazamiento vertical D (en coordenadas de origen) que endereza los renglones; null si no hace falta.
+// 2) Corrección por renglón: lo que la base suave no explica en cada renglón (una doblez, una esquina
+//    que cae en solo dos o tres renglones) se corrige en ese renglón y se interpola entre renglones
+//    vecinos; se desvanece lejos del texto.
+function textDisplacement(cv, mat) {
+  const W = mat.cols, H = mat.rows
+  const { frags, ch } = textFragments(cv, mat)
+  if (frags.length < 8) return null
+  const ysAll = frags.flatMap((f) => f.ys).sort((a, b) => a - b)
+  if (ysAll[Math.floor(ysAll.length * 0.99)] - ysAll[Math.floor(ysAll.length * 0.01)] < H * 0.15) return null
+  const base = smoothDisplacement(frags, W, H)
+  if (!base) return null
+  const gw = 96
+  const gh = Math.min(1200, Math.max(64, Math.round((2 * H) / ch)))
+  const colX = Array.from({ length: gw }, (_, gx) => (gx * (W - 1)) / (gw - 1))
+  // Para cada renglón y columna: altura del renglón y desplazamiento residual
+  const lines = groupLines(frags, base.slope, ch)
+    .filter((L) => L.xs[L.xs.length - 1] - L.xs[0] > ch * 4)
+    .map((L) => {
+      const X0 = L.xs[0], X1 = L.xs[L.xs.length - 1]
+      const yAt = (x) => {
+        let k = 1
+        while (k < L.xs.length - 1 && L.xs[k] < x) k++
+        const t = (x - L.xs[k - 1]) / (L.xs[k] - L.xs[k - 1] || 1)
+        return L.ys[k - 1] + (L.ys[k] - L.ys[k - 1]) * Math.min(1, Math.max(0, t))
+      }
+      const e = L.xs.map((x, k) => L.ys[k] - base.at(x, L.ys[k]))
+      const med = [...e].sort((a, b) => a - b)[Math.floor(e.length / 2)]
+      const y = new Float32Array(gw), r = new Float32Array(gw)
+      const edge = (xe) => { const ye = yAt(xe); return { ye, re: ye - base.at(xe, ye) - med } }
+      const left = edge(X0), right = edge(X1)
+      colX.forEach((x, gx) => {
+        if (x >= X0 && x <= X1) {
+          y[gx] = yAt(x)
+          r[gx] = y[gx] - base.at(x, y[gx]) - med
+        } else {
+          // Fuera del renglón: sigue la base y el residuo se apaga en ~4 letras
+          const { ye, re } = x < X0 ? left : right
+          const xe = x < X0 ? X0 : X1
+          y[gx] = ye + base.at(x, ye) - base.at(xe, ye)
+          r[gx] = re * Math.max(0, 1 - Math.abs(x - xe) / (ch * 4))
+        }
+      })
+      return { y, r }
+    })
+  const fade = (d) => Math.max(0, 1 - Math.max(0, d - ch) / (ch * 2))
+  const D = new Float32Array(gw * gh)
+  const lim = H * 0.1
+  let max = 0
+  for (let gx = 0; gx < gw; gx++) {
+    const order = lines.map((L) => ({ y: L.y[gx], r: L.r[gx] })).sort((a, b) => a.y - b.y)
+    let k = 0
+    for (let gy = 0; gy < gh; gy++) {
+      const y = (gy * (H - 1)) / (gh - 1)
+      while (k < order.length && order[k].y <= y) k++
+      const A = order[k - 1], B = order[k]
+      let r = 0
+      if (A && B && B.y - A.y <= ch * 5) r = A.r + ((B.r - A.r) * (y - A.y)) / (B.y - A.y || 1)
+      else r = (A ? A.r * fade(y - A.y) : 0) + (B ? B.r * fade(B.y - y) : 0)
+      const d = Math.max(-lim, Math.min(lim, base.at(colX[gx], y) + r))
+      D[gy * gw + gx] = d
+      max = Math.max(max, Math.abs(d))
+    }
+  }
+  if (max < Math.max(1.5, H * 0.002)) return null
+  return { at: gridSampler(D, gw, gh, W, H), max, lines: lines.length }
 }
 
 function straightenLines(cv, mat) {
   const w = mat.cols, h = mat.rows
-  const lines = findTextLines(cv, mat)
-  if (lines.length < 3) return null
-  const prof = lineProfiles(lines, w)
-  if (Math.max(...prof.map((p) => maxAbs(p.d))) < h * 0.002) return null
+  const f = textDisplacement(cv, mat)
+  if (!f) return null
+  // D está en coordenadas de origen (y_salida = y_origen − D). Se invierte columna a columna
+  // recorriendo el origen: exacto aunque haya dobleces bruscas (una iteración de punto fijo no basta).
+  const gw = 96
+  const gh = Math.min(2048, Math.max(64, Math.ceil(h / 3)))
+  const inv = new Float32Array(gw * gh)
+  for (let gx = 0; gx < gw; gx++) {
+    const x = (gx * (w - 1)) / (gw - 1)
+    let prevS = 0, prevO = -f.at(x, 0), j = 0
+    const outY = (j) => (j * (h - 1)) / (gh - 1)
+    while (j < gh && outY(j) <= prevO) { inv[j * gw + gx] = outY(j) + f.at(x, 0); j++ }
+    for (let ys = 1; ys < h && j < gh; ys++) {
+      const o = Math.max(prevO, ys - f.at(x, ys)) // monótona: nunca se dobla sobre sí misma
+      while (j < gh && outY(j) <= o) {
+        const t = o > prevO ? (outY(j) - prevO) / (o - prevO) : 0
+        inv[j * gw + gx] = prevS + t * (ys - prevS)
+        j++
+      }
+      prevS = ys
+      prevO = o
+    }
+    for (; j < gh; j++) inv[j * gw + gx] = outY(j) + f.at(x, h - 1)
+  }
+  const src = gridSampler(inv, gw, gh, w, h)
   return remapStrips(cv, mat, w, h, (y, mx, my) => {
-    let i = 0
-    while (i < prof.length - 1 && prof[i + 1].y0 < y) i++
-    const a = prof[i]
-    const b = prof[Math.min(prof.length - 1, i + 1)]
-    const t = b.y0 > a.y0 ? Math.min(1, Math.max(0, (y - a.y0) / (b.y0 - a.y0))) : 0
     for (let x = 0; x < w; x++) {
       mx[x] = x
-      my[x] = y + (1 - t) * a.d[x] + t * b.d[x]
+      my[x] = src(x, y)
     }
   })
 }

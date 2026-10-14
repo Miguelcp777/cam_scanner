@@ -2,7 +2,7 @@
 // Uso, desde la consola del navegador con `npm run dev`:
 //   const b = await import('/src/dev/scanBench.js'); console.table(await b.runBench())
 // Genera fotos sintéticas con proyección 3D real de una hoja (esquinas conocidas) y mide el error.
-import { detectCorners, flattenDocument, loadCV, measureLineCurvature, releaseCanvas, warpDocument, warpImage } from '../lib/scan'
+import { detectCorners, flattenDocument, loadCV, releaseCanvas, warpDocument, warpImage } from '../lib/scan'
 
 function docCanvas(w, h) {
   const c = document.createElement('canvas')
@@ -19,11 +19,56 @@ function docCanvas(w, h) {
   return c
 }
 
-// Curva la hoja: desplazamiento vertical bend·alto·sin(π·x/ancho) (como un tique que se enrolla)
-function bendCanvas(cv, src, bend) {
+// Tique de caja: líneas cortas centradas, columnas etiqueta/valor y separadores (como un tique real)
+function receiptCanvas(w, h) {
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const x = c.getContext('2d')
+  x.fillStyle = '#fbfaf6'
+  x.fillRect(0, 0, w, h)
+  x.fillStyle = '#333'
+  const fs = w / 22
+  x.font = `${fs}px monospace`
+  const rows = [
+    ['c', 'P. AVDA DEL OESTE'], ['c', 'PARKING MOVILIDAD S.L'], ['c', 'CIF: B-00000000'], ['=', ''],
+    ['l', '28/09/2026 13:47', 'T26/701'], ['l', 'Caja: 701', ''], ['c', 'Num Factura simplificada:'], ['c', '20026/701070642'], ['-', ''],
+    ['c', '** Ticket Entrada **'], ['l', 'Num. producto:', '02020339608'], ['l', 'Matricula:', '0000XXX'], ['l', 'Tarifa:', 'Tarifa 1'],
+    ['l', 'Entrada:', '28/09/2026 12:03'], ['l', 'Pago:', '28/09/2026 13:47'], ['l', 'Importe:', '4,55 E'], ['-', ''],
+    ['l', 'Base Imp.:', '3,76 E'], ['l', 'I.V.A. (21%):', '0,79 E'], ['l', 'T O T A L:', '4,55 E'], ['c', '** PAGO CON TARJETA **'],
+    ['l', 'Autorizacion:', '741026'], ['=', ''], ['c', 'Gracias por su visita'], ['c', 'Fecha: 28/09/2026 13:47'], ['=', ''],
+  ]
+  const step = (h * 0.9) / rows.length
+  rows.forEach(([k, a, b], i) => {
+    const y = h * 0.06 + i * step
+    if (k === '=' || k === '-') {
+      for (let xx = w * 0.06; xx < w * 0.94; xx += fs * 0.6) x.fillRect(xx, y - fs * (k === '=' ? 0.45 : 0.3), fs * 0.4, fs * 0.12)
+      if (k === '=') for (let xx = w * 0.06; xx < w * 0.94; xx += fs * 0.6) x.fillRect(xx, y - fs * 0.2, fs * 0.4, fs * 0.12)
+    } else if (k === 'c') {
+      x.fillText(a, (w - x.measureText(a).width) / 2, y)
+    } else {
+      x.fillText(a, w * 0.08, y)
+      x.fillText(b, w * 0.92 - x.measureText(b).width, y)
+    }
+  })
+  return c
+}
+
+// Deformaciones del papel (desplazamiento vertical en px, x∈[0,1], y∈[0,1]):
+//  sin  — curvatura uniforme (hoja que se arquea)
+//  curl — el extremo superior se enrolla (curvatura que crece hacia arriba, típica de un tique)
+//  lift — la parte de arriba se levanta e inclina los renglones superiores (caso de la foto real)
+const BENDS = {
+  sin: (x) => Math.sin(Math.PI * x),
+  curl: (x, y) => Math.sin(Math.PI * x) * (1 - y) ** 2,
+  lift: (x, y) => (2 * (x - 0.5) + 0.6 * Math.sin(Math.PI * x)) * (1 - y) ** 2,
+}
+
+function bendCanvas(cv, src, bend, mode = 'sin') {
   const w = src.width
   const h = src.height
   const A = Math.round(h * bend)
+  const fn = BENDS[mode]
   const s = cv.imread(src)
   const out = new cv.Mat()
   const mx = new cv.Mat(h + 2 * A, w, cv.CV_32FC1)
@@ -31,7 +76,7 @@ function bendCanvas(cv, src, bend) {
   for (let y = 0; y < h + 2 * A; y++) {
     for (let x = 0; x < w; x++) {
       mx.data32F[y * w + x] = x
-      my.data32F[y * w + x] = y - A - A * Math.sin((Math.PI * x) / w) + A
+      my.data32F[y * w + x] = y - A * fn(x / w, Math.min(1, Math.max(0, (y - A) / h)))
     }
   }
   cv.remap(s, out, mx, my, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 0))
@@ -66,7 +111,7 @@ function drawBackground(ox, W, H, { clutter, checker }) {
   }
 }
 
-export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15, rotZ = 0.1, f = 1500, W = 1512, H = 2016, bg = '#5a4a3c', shadow = 0.5, finger = false, bend = 0, clutter = false, checker = false, dark = 0, noise = 0 } = {}) {
+export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15, rotZ = 0.1, f = 1500, W = 1512, H = 2016, bg = '#5a4a3c', shadow = 0.5, finger = false, bend = 0, bendMode = 'sin', contentOnly = false, receipt = false, clutter = false, checker = false, dark = 0, noise = 0 } = {}) {
   const { cv } = await loadCV()
   const dh = 0.297
   const dw = dh * ratio
@@ -86,8 +131,20 @@ export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15,
   ox.fillStyle = bg
   ox.fillRect(0, 0, W, H)
   drawBackground(ox, W, H, { clutter, checker })
-  const flat = docCanvas(1000, Math.round(1000 / ratio))
-  const dc = bend ? bendCanvas(cv, flat, bend) : flat
+  const flat = receipt ? receiptCanvas(700, Math.round(700 / ratio)) : docCanvas(1000, Math.round(1000 / ratio))
+  let dc = bend ? bendCanvas(cv, flat, bend, bendMode) : flat
+  // contentOnly: solo se deforma el texto; los bordes del papel siguen rectos (lo que ve el aplanador
+  // cuando los bordes no delatan la curvatura, p. ej. papel levantado o bordes poco visibles)
+  if (bend && contentOnly) {
+    const c = document.createElement('canvas')
+    c.width = flat.width
+    c.height = flat.height
+    const cx = c.getContext('2d')
+    cx.fillStyle = receipt ? '#fbfaf6' : '#f7f5ef'
+    cx.fillRect(0, 0, c.width, c.height)
+    cx.drawImage(dc, 0, -(dc.height - flat.height) / 2)
+    dc = c
+  }
   const s = cv.imread(dc)
   const d = cv.imread(out)
   const warped = new cv.Mat()
@@ -196,17 +253,78 @@ export async function runWarpBench() {
   return rows
 }
 
-// Papel curvado: curvatura de los renglones (px, percentil 80) sin y con aplanado.
-export async function runFlattenBench() {
-  const { cv } = await loadCV()
-  const cfgs = {
-    'A4 curvada (3 %)': { bend: 0.03, tiltX: 0.3 },
-    'A4 muy curvada (6 %)': { bend: 0.06, tiltX: 0.35, rotZ: -0.05 },
-    'Tique enrollado (4 %) sobre madera': { ratio: 0.33, bend: 0.04 * 3, bg: '#b5743a', tiltX: 0.3, rotZ: 0.05, shadow: 0.2 },
-    'A4 plana (control)': { tiltX: 0.4 },
+// Desalineación de renglones independiente del aplanador: la página (a 1000 px de alto) se divide en
+// franjas verticales y bandas horizontales; en cada banda se busca el desplazamiento vertical que mejor
+// alinea el perfil de tinta de cada franja con la siguiente. Renglones rectos y horizontales → 0 px.
+export function misalignment(cv, canvas) {
+  const m = cv.imread(canvas)
+  const g = new cv.Mat()
+  const bin = new cv.Mat()
+  const k = 1000 / m.rows
+  cv.cvtColor(m, g, cv.COLOR_RGBA2GRAY)
+  cv.resize(g, g, new cv.Size(Math.round(m.cols * k), 1000), 0, 0, cv.INTER_AREA)
+  cv.adaptiveThreshold(g, bin, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 25, 15)
+  const W = bin.cols, H = bin.rows, d = bin.data
+  const K = 8, B = 5, S = 25
+  const x0 = W * 0.04, sw = (W * 0.92) / K
+  const y0 = H * 0.03, bh = Math.floor((H * 0.94) / B)
+  const bands = []
+  for (let b = 0; b < B; b++) {
+    const ya = Math.round(y0 + b * bh)
+    const prof = []
+    for (let s = 0; s < K; s++) {
+      const p = new Float32Array(bh + 2 * S)
+      for (let y = -S; y < bh + S; y++) {
+        const yy = ya + y
+        if (yy < 0 || yy >= H) continue
+        let c = 0
+        for (let x = Math.round(x0 + s * sw); x < Math.round(x0 + (s + 1) * sw); x++) c += d[yy * W + x] ? 1 : 0
+        p[y + S] = c
+      }
+      prof.push(p)
+    }
+    let cum = 0, lo = 0, hi = 0
+    for (let s = 0; s + 1 < K; s++) {
+      const A = prof[s], Bp = prof[s + 1]
+      let inkA = 0, inkB = 0
+      for (let y = S; y < bh + S; y++) { inkA += A[y]; inkB += Bp[y] }
+      if (inkA < sw * bh * 0.01 || inkB < sw * bh * 0.01) continue
+      let best = -Infinity, bt = 0
+      for (let t = -S; t <= S; t++) {
+        let sab = 0, saa = 0, sbb = 0
+        for (let y = S; y < bh + S; y++) { const a = A[y], bb = Bp[y + t]; sab += a * bb; saa += a * a; sbb += bb * bb }
+        const ncc = sab / Math.sqrt(saa * sbb || 1)
+        if (ncc > best) { best = ncc; bt = t }
+      }
+      cum += bt
+      lo = Math.min(lo, cum)
+      hi = Math.max(hi, cum)
+    }
+    bands.push(hi - lo)
   }
+  ;[m, g, bin].forEach((x) => x.delete())
+  return { max: Math.max(...bands), mean: bands.reduce((a, b) => a + b, 0) / B }
+}
+
+// Papel curvado: desalineación de renglones (px por cada 1000 px de alto) sin y con aplanado.
+export const FLATTEN_CASES = {
+  'A4 curvada (3 %)': { bend: 0.03, tiltX: 0.3 },
+  'A4 muy curvada (6 %)': { bend: 0.06, tiltX: 0.35, rotZ: -0.05 },
+  'A4 esquina superior levantada': { bend: 0.04, bendMode: 'lift', tiltX: 0.3 },
+  'Tique curvado': { receipt: true, ratio: 0.33, bend: 0.03, bg: '#b5743a', tiltX: 0.3, rotZ: 0.05, shadow: 0.2 },
+  'Tique enrollado arriba': { receipt: true, ratio: 0.33, bend: 0.04, bendMode: 'curl', bg: '#b5743a', tiltX: 0.25, shadow: 0.2 },
+  'Tique levantado arriba (foto real)': { receipt: true, ratio: 0.33, bend: 0.03, bendMode: 'lift', bg: '#7a5a40', tiltX: 0.3, rotZ: -0.04 },
+  'Tique: solo el texto torcido (bordes rectos)': { receipt: true, ratio: 0.33, bend: 0.03, bendMode: 'lift', contentOnly: true, bg: '#7a5a40', tiltX: 0.3 },
+  'Tique: solo el texto enrollado (bordes rectos)': { receipt: true, ratio: 0.33, bend: 0.04, bendMode: 'curl', contentOnly: true, bg: '#7a5a40', tiltX: 0.25 },
+  'A4: solo el texto curvado (bordes rectos)': { bend: 0.03, contentOnly: true, tiltX: 0.3 },
+  'A4 plana (control)': { tiltX: 0.4 },
+  'Tique plano (control)': { receipt: true, ratio: 0.33, tiltX: 0.3 },
+}
+
+export async function runFlattenBench(cases = FLATTEN_CASES) {
+  const { cv } = await loadCV()
   const rows = []
-  for (const [name, cfg] of Object.entries(cfgs)) {
+  for (const [name, cfg] of Object.entries(cases)) {
     const { canvas } = await photo(cfg)
     const pts = await detectCorners(canvas)
     if (!pts) {
@@ -217,26 +335,30 @@ export async function runFlattenBench() {
     const t0 = performance.now()
     const fl = await flattenDocument(canvas, points)
     const ms = Math.round(performance.now() - t0)
-    const curv = (c) => {
-      const m = cv.imread(c)
-      const r = measureLineCurvature(cv, m)
-      m.delete()
-      return r
-    }
-    const before = curv(plain)
-    const after = fl ? curv(fl.canvas) : before
+    const before = misalignment(cv, plain)
+    const after = fl ? misalignment(cv, fl.canvas) : before
     rows.push({
       caso: name,
-      ok: after.max <= Math.max(3, before.max * 0.35) ? '✓' : '✗',
-      curvatura_antes_px: +before.max.toFixed(1),
-      curvatura_despues_px: +after.max.toFixed(1),
-      renglones: before.lines,
+      ok: after.max <= 4 ? '✓' : '✗',
+      desalineado_antes: +before.max.toFixed(1),
+      desalineado_despues: +after.max.toFixed(1),
+      media_despues: +after.mean.toFixed(1),
       aplicado: fl ? [fl.edges && 'bordes', fl.lines && 'renglones'].filter(Boolean).join('+') : 'no',
       ms,
     })
     ;[plain, canvas, fl?.canvas].forEach(releaseCanvas)
   }
   return rows
+}
+
+// Imagen de un caso de aplanado (para revisar a ojo): { foto, recorte, aplanado } como data URL
+export async function flattenSample(cfg) {
+  const { canvas } = await photo(cfg)
+  const pts = await detectCorners(canvas)
+  const { canvas: plain, points } = await warpDocument(canvas, pts)
+  const fl = await flattenDocument(canvas, points)
+  const url = (c) => c.toDataURL('image/jpeg', 0.8)
+  return { foto: url(canvas), recorte: url(plain), aplanado: fl ? url(fl.canvas) : null }
 }
 
 export async function runBench(cases = CASES) {

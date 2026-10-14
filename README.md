@@ -60,7 +60,9 @@ modo sin conexión requieren HTTPS real**, es decir, publicar la app (Cloudflare
    no está segura, se usa el método clásico (`findQuad`). En ambos casos se afina cada lado con rectas robustas
    (`refineQuad`). Se puede elegir el motor en Ajustes.
 2. Ajuste final al papel exacto (`snapToPaper`) y proporción real con corrección de perspectiva.
-3. Aplanado de papel curvado (`flattenDocument`): bordes curvos → parche de Coons; renglones curvos → desplazamiento vertical.
+3. Aplanado de papel curvado (`flattenDocument`): bordes curvos → parche de Coons; después, con los fragmentos de texto
+   (palabras, columnas de tique, separadores) se calcula una base suave de inclinación y una corrección por renglón, que
+   endereza también esquinas levantadas y dobleces locales.
 4. Filtro *Documento*: iluminación uniforme, restos de fondo en los bordes eliminados, niveles adaptativos.
 5. Recorte manual con lupa 4× al arrastrar una esquina.
 
