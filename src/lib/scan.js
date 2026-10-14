@@ -1290,6 +1290,68 @@ function whitenBorders(rgb, gray, orig) {
   side(H, W, (i, k) => (H - 1 - k) * W + i) // abajo
 }
 
+// Restos finos de fondo pegados al borde (líneas marrones curvas en las esquinas de un tique, trozos
+// de mesa): se toma el color del papel y, desde el borde hacia dentro, se borra todo lo conectado al
+// borde que no sea papel (otro color u oscuro), sin pasar de una franja del 6 % del lado menor.
+// El texto no se toca: siempre está separado del borde por margen de papel.
+function clearEdgeResidue(rgb, gray, orig) {
+  const W = gray.cols, H = gray.rows
+  const g = gray.data, c = rgb.data, o = orig.data
+  // Color del papel: mediana de (r−g, g−b) en la zona central clara
+  const rg = [], gb = []
+  for (let y = Math.floor(H * 0.2); y < H * 0.8; y += 5) {
+    for (let x = Math.floor(W * 0.2); x < W * 0.8; x += 5) {
+      const j = y * W + x
+      if (g[j] < 200) continue
+      rg.push(o[j * 4] - o[j * 4 + 1])
+      gb.push(o[j * 4 + 1] - o[j * 4 + 2])
+    }
+  }
+  if (rg.length < 50) return
+  const med = (a) => a.sort((x, y) => x - y)[Math.floor(a.length / 2)]
+  const prg = med(rg), pgb = med(gb)
+  // Umbrales bajos a propósito: los restos tenues (gris ~215, apenas color) también se ven tras los niveles
+  const notPaper = (j) => g[j] < 215 || Math.abs(o[j * 4] - o[j * 4 + 1] - prg) + Math.abs(o[j * 4 + 1] - o[j * 4 + 2] - pgb) > 12
+  const band = Math.max(4, Math.round(Math.min(W, H) * 0.06))
+  const seed = 3
+  const mask = new Uint8Array(W * H)
+  const queue = new Int32Array(W * H)
+  let qn = 0
+  const push = (j) => {
+    if (!mask[j] && notPaper(j)) {
+      mask[j] = 1
+      queue[qn++] = j
+    }
+  }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (x < seed || y < seed || x >= W - seed || y >= H - seed) push(y * W + x)
+    else if (x === seed) x = W - seed - 1 // salta el interior
+  }
+  for (let q = 0; q < qn; q++) {
+    const j = queue[q], x = j % W, y = (j / W) | 0
+    if (x >= band && y >= band && x < W - band && y < H - band) continue
+    if (x > 0) push(j - 1)
+    if (x < W - 1) push(j + 1)
+    if (y > 0) push(j - W)
+    if (y < H - 1) push(j + W)
+  }
+  // Si ocupa gran parte de la franja no son restos sino contenido (folleto o papel de color hasta el borde)
+  const bandArea = 2 * band * (W + H) - 4 * band * band
+  if (qn > bandArea * 0.35) return
+  // Pinta de blanco lo marcado con un pequeño halo (bordes suavizados del resto)
+  const halo = 2
+  for (let q = 0; q < qn; q++) {
+    const j = queue[q], x = j % W, y = (j / W) | 0
+    for (let dy = -halo; dy <= halo; dy++) for (let dx = -halo; dx <= halo; dx++) {
+      const xx = x + dx, yy = y + dy
+      if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue
+      const k = yy * W + xx
+      g[k] = 255
+      c[k * 3] = c[k * 3 + 1] = c[k * 3 + 2] = 255
+    }
+  }
+}
+
 function percentile(gray, p) {
   const hist = new Uint32Array(256)
   const d = gray.data
@@ -1323,6 +1385,7 @@ export async function applyFilter(canvas, filter) {
   try {
     cv.cvtColor(norm, gray, cv.COLOR_RGB2GRAY)
     whitenBorders(norm, gray, src)
+    clearEdgeResidue(norm, gray, src)
     if (filter === 'enhance') {
       levels(norm, gray)
       cv.imshow(out, norm)
