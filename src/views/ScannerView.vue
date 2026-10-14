@@ -44,7 +44,7 @@ const mode = ref(route.query.mode === 'id' ? 'id' : 'single')
 const burst = computed(() => mode.value !== 'single') // ráfaga e ID capturan sin salir de la cámara
 const shots = ref([]) // capturas de la ráfaga: [{ blob, hint, url }]
 const flash = ref(false)
-const STABLE_TICKS = 8 // ~1,2 s quieto → foto automática
+const STABLE_MS = 1200 // 1,2 s quieto → foto automática
 let detector = null
 let loopTimer = null
 let capturing = false
@@ -56,7 +56,7 @@ const cameraHint = computed(() => {
   if (!liveQuad.value) return side + (mode.value === 'id' ? 'encuadra la tarjeta sobre un fondo oscuro' : 'Buscando documento… Encuadra la hoja sobre un fondo que contraste.')
   if (burst.value && lastSig && !isNewPage()) return mode.value === 'id' ? 'Dale la vuelta a la tarjeta' : 'Cambia de hoja para la siguiente página'
   if (!auto.value) return 'Documento detectado. Pulsa el botón para capturar.'
-  return stable.value >= STABLE_TICKS / 2 ? 'Mantén el móvil quieto…' : 'Documento detectado'
+  return stable.value >= STABLE_MS / 2 ? 'Mantén el móvil quieto…' : 'Documento detectado'
 })
 
 async function startCamera() {
@@ -71,6 +71,7 @@ async function startCamera() {
     video.value.srcObject = stream
     await video.value.play().catch(() => {})
     const { cv } = await loadCV()
+    lastTick = performance.now()
     detector = createLiveDetector(cv)
     detectLoop()
   } catch (e) {
@@ -105,24 +106,29 @@ function isNewPage() {
   return diff / s.length > 9
 }
 
-function detectLoop() {
+let lastTick = 0
+async function detectLoop() {
   clearTimeout(loopTimer)
   if (!stream || !detector || step.value !== 'camera') return
   const v = video.value
   try {
-    const q = v.readyState >= 2 ? detector.detect(v) : null
+    const q = v.readyState >= 2 ? await detector.detect(v) : null
+    if (!stream || step.value !== 'camera') return // la cámara se cerró mientras se analizaba
     videoSize.value = { w: v.videoWidth || 1, h: v.videoHeight || 1 }
     const tol = Math.max(videoSize.value.w, videoSize.value.h) * 0.025
-    stable.value = q && liveQuad.value && !moved(q, liveQuad.value, tol) ? stable.value + 1 : 0
+    const now = performance.now()
+    // Tiempo (ms) que el documento lleva quieto: no depende de lo rápido que analice el móvil
+    stable.value = q && liveQuad.value && !moved(q, liveQuad.value, tol) ? stable.value + (now - lastTick) : 0
+    lastTick = now
     liveQuad.value = q
-    if (auto.value && stable.value >= STABLE_TICKS && (!burst.value || isNewPage())) {
+    if (auto.value && stable.value >= STABLE_MS && (!burst.value || isNewPage())) {
       capture()
       return
     }
   } catch (e) {
     console.error(e)
   }
-  loopTimer = setTimeout(detectLoop, 150)
+  loopTimer = setTimeout(detectLoop, 120)
 }
 
 function stopCamera() {
@@ -344,7 +350,7 @@ onBeforeUnmount(() => {
         <polygon
           v-if="liveQuad"
           :points="livePolygon"
-          :class="['live', { steady: stable >= STABLE_TICKS / 2 }]"
+          :class="['live', { steady: stable >= STABLE_MS / 2 }]"
           :style="{ strokeWidth: Math.max(videoSize.w, videoSize.h) / 120 }"
         />
       </svg>

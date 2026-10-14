@@ -41,7 +41,32 @@ function bendCanvas(cv, src, bend) {
   return c
 }
 
-export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15, rotZ = 0.1, f = 1500, W = 1512, H = 2016, bg = '#5a4a3c', shadow = 0.5, finger = false, bend = 0 } = {}) {
+// Fondos difíciles: otros papeles y texto alrededor, mantel de cuadros
+function drawBackground(ox, W, H, { clutter, checker }) {
+  let seed = 7
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+  if (checker) {
+    const s = 90
+    for (let y = 0; y < H; y += s) for (let x = 0; x < W; x += s) {
+      ox.fillStyle = ((x + y) / s) % 2 ? '#d8d2c4' : '#8d3a3a'
+      ox.fillRect(x, y, s, s)
+    }
+  }
+  if (clutter) {
+    for (let i = 0; i < 7; i++) {
+      ox.save()
+      ox.translate(rnd() * W, rnd() * H)
+      ox.rotate(rnd() * 3)
+      ox.fillStyle = ['#efe9dc', '#dfe7ef', '#f3f0e6'][i % 3]
+      ox.fillRect(-180, -120, 360 + rnd() * 200, 240 + rnd() * 150)
+      ox.fillStyle = '#555'
+      for (let l = 0; l < 6; l++) ox.fillRect(-150, -90 + l * 32, 200 + rnd() * 120, 9)
+      ox.restore()
+    }
+  }
+}
+
+export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15, rotZ = 0.1, f = 1500, W = 1512, H = 2016, bg = '#5a4a3c', shadow = 0.5, finger = false, bend = 0, clutter = false, checker = false, dark = 0, noise = 0 } = {}) {
   const { cv } = await loadCV()
   const dh = 0.297
   const dw = dh * ratio
@@ -60,6 +85,7 @@ export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15,
   const ox = out.getContext('2d')
   ox.fillStyle = bg
   ox.fillRect(0, 0, W, H)
+  drawBackground(ox, W, H, { clutter, checker })
   const flat = docCanvas(1000, Math.round(1000 / ratio))
   const dc = bend ? bendCanvas(cv, flat, bend) : flat
   const s = cv.imread(dc)
@@ -93,7 +119,45 @@ export async function photo({ ratio = 1 / Math.SQRT2, tiltX = 0.5, tiltY = 0.15,
     ox.ellipse(truth[3].x + 10, truth[3].y + 40, 70, 150, 0.5, 0, 7)
     ox.fill()
   }
+  // Poca luz y ruido de sensor
+  if (dark || noise) {
+    const id = ox.getImageData(0, 0, W, H)
+    const d = id.data
+    let seed = 11
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+    for (let i = 0; i < d.length; i += 4) {
+      const n = (rnd() - 0.5) * 2 * noise
+      for (let c = 0; c < 3; c++) d[i + c] = Math.max(0, Math.min(255, d[i + c] * (1 - dark) + n))
+    }
+    ox.putImageData(id, 0, 0)
+  }
   return { canvas: out, truth, ratio }
+}
+
+export const HARD_CASES = {
+  'Mesa blanca (casi sin contraste)': { bg: '#e6e3dc', shadow: 0.15, tiltX: 0.35 },
+  'Rodeado de otros papeles': { bg: '#6b5644', clutter: true, tiltX: 0.4 },
+  'Mantel de cuadros': { checker: true, shadow: 0.2, tiltX: 0.35 },
+  'Poca luz y ruido': { bg: '#4a4038', dark: 0.55, noise: 28, tiltX: 0.4 },
+  'Papeles + mesa clara + sombra': { bg: '#cfcac0', clutter: true, shadow: 0.45 },
+}
+
+// Compara el detector clásico con el de IA (con y sin afinado) en los casos difíciles y en los normales
+export async function runAiBench(cases = { ...HARD_CASES, ...CASES }) {
+  const { aiCorners } = await import('../lib/aiDetect')
+  const { snapCorners } = await import('../lib/scan')
+  const rows = []
+  for (const [name, cfg] of Object.entries(cases)) {
+    const { canvas, truth } = await photo(cfg)
+    const diag = Math.hypot(canvas.width, canvas.height)
+    const err = (pts) => (pts ? +((Math.max(...truth.map((t) => Math.min(...pts.map((p) => Math.hypot(p.x - t.x, p.y - t.y))))) / diag) * 100).toFixed(2) : null)
+    const classic = await detectCorners(canvas, { engine: 'classic' })
+    const ai = await aiCorners(canvas)
+    const aiRefined = ai ? await snapCorners(canvas, ai.points) : null
+    rows.push({ caso: name, clasico_pct: err(classic), ia_pct: err(ai?.points), ia_afinada_pct: err(aiRefined), confianza: ai && +ai.confidence.toFixed(2) })
+    releaseCanvas(canvas)
+  }
+  return rows
 }
 
 export const CASES = {

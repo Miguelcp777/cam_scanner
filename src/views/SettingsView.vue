@@ -4,7 +4,10 @@ import { onMounted, ref } from 'vue'
 import ResultPanel from '../components/ResultPanel.vue'
 import { createBackup, readBackup, restoreBackup } from '../lib/backup'
 import { listDocs, listTrash } from '../lib/db'
+import { DETECTION_ENGINES, detectionEngine, setDetectionEngine } from '../lib/scan'
 import { formatDate } from '../lib/util'
+
+const engine = ref(detectionEngine())
 
 const busy = ref('')
 const progress = ref(0)
@@ -96,6 +99,17 @@ onMounted(loadStats)
   </section>
 
   <section class="card block">
+    <h2>Detección de bordes</h2>
+    <label v-for="(label, k) in DETECTION_ENGINES" :key="k" class="opt">
+      <input v-model="engine" type="radio" :value="k" @change="setDetectionEngine(engine)" /> {{ label }}
+    </label>
+    <p class="muted small">
+      La IA localiza las esquinas incluso sobre mesas claras, fondos con otros papeles o manteles con dibujo. Se ejecuta
+      en el propio dispositivo: las fotos no se envían a ningún servidor.
+    </p>
+  </section>
+
+  <section class="card block">
     <h2>Almacenamiento</h2>
     <ul v-if="stats" class="stats">
       <li>{{ stats.docs }} documento(s) · <RouterLink to="/file/recycler">{{ stats.trash }} en la papelera</RouterLink></li>
@@ -104,6 +118,15 @@ onMounted(loadStats)
         Almacenamiento persistente: {{ stats.persisted ? 'sí ✅' : 'no — instala la app en la pantalla de inicio para que el navegador no borre los datos' }}
       </li>
     </ul>
+  </section>
+
+  <section class="card block">
+    <h2>Créditos</h2>
+    <p class="muted small">
+      Detección de esquinas con el modelo <a href="https://github.com/DocsaidLab/DocAligner" target="_blank" rel="noopener">DocAligner</a>
+      de DocsaidLab (<a href="/models/LICENSE-DocAligner.txt" target="_blank">licencia Apache 2.0</a>), ejecutado con ONNX Runtime Web (MIT).
+      Procesado de imagen con OpenCV.js (Apache 2.0), OCR con Tesseract.js (Apache 2.0) y PDF con pdf.js y pdf-lib.
+    </p>
   </section>
 </template>
 
@@ -115,4 +138,7 @@ onMounted(loadStats)
 .confirm p { margin: 0 0 8px; }
 .stats { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
 .stats a { color: var(--accent-dark); }
+.opt { display: flex; align-items: center; gap: 8px; }
+.small { font-size: .85rem; margin: 0; }
+.small a { color: var(--accent-dark); }
 </style>

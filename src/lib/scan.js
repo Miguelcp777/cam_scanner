@@ -369,8 +369,9 @@ export function refineQuad(cv, canvas, quad, passes = PASSES_DEFAULT) {
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY)
     cv.GaussianBlur(gray, gray, new cv.Size(5, 5), 0)
     cv.morphologyEx(gray, gray, cv.MORPH_CLOSE, k)
-    const med = medianOf(gray.data)
-    cv.Canny(gray, edges, Math.max(10, 0.5 * med), Math.min(255, 1.2 * med))
+    // Umbrales bajos: con papel claro sobre mesa clara el borde es débil. Solo se buscan bordes en una
+    // franja junto a cada lado y RANSAC descarta el ruido, así que se puede ser permisivo.
+    cv.Canny(gray, edges, 12, 36)
     const map = { data: edges.data, W, H }
     return passes.reduce((q, [band, move]) => refinePass(map, q, diag * band, diag * move), quad)
   } finally {
@@ -411,7 +412,51 @@ function refinePass({ data, W, H }, quad, band, maxMove) {
 }
 
 // Detección sobre una imagen o canvas de cualquier tamaño. Devuelve 4 puntos o null si no hay documento claro.
-export async function detectCorners(img) {
+// --- Motor de detección ---
+// 'auto': IA (DocAligner) y, si no está segura, el método clásico | 'ai': solo IA | 'classic': solo clásico
+export const DETECTION_ENGINES = { auto: 'IA + respaldo clásico', ai: 'Solo IA', classic: 'Solo clásico (sin IA)' }
+export const AI_MIN_CONFIDENCE = 0.35
+
+export function detectionEngine() {
+  try {
+    return localStorage.getItem('detectEngine') || 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
+export function setDetectionEngine(engine) {
+  try {
+    localStorage.setItem('detectEngine', engine)
+  } catch {}
+}
+
+// Esquinas por IA (o null si falta alguna, no es fiable o no tiene forma de documento)
+export async function aiQuad(img) {
+  const { aiCorners } = await import('./aiDetect')
+  const r = await aiCorners(img)
+  if (!r || r.confidence < AI_MIN_CONFIDENCE) return null
+  const q = orderPoints(r.points)
+  const { w, h } = sizeOf(img)
+  return plausibleQuad(q) && polygonArea(q) > w * h * 0.02 ? q : null
+}
+
+// Detección sobre una imagen o canvas de cualquier tamaño. Devuelve 4 puntos o null si no hay documento claro.
+export async function detectCorners(img, { engine = detectionEngine() } = {}) {
+  if (engine !== 'classic') {
+    try {
+      const q = await aiQuad(img)
+      // La IA trabaja a 256×256: se afinan sus esquinas con rectas sobre los bordes reales a alta resolución
+      if (q) return await snapCorners(img, q)
+    } catch (e) {
+      console.warn('Detección por IA no disponible; se usa el método clásico', e)
+    }
+    if (engine === 'ai') return null
+  }
+  return classicCorners(img)
+}
+
+async function classicCorners(img) {
   const { cv } = await loadCV()
   const coarse = scaledCanvas(img, DETECT_SIDE)
   let quad
@@ -435,20 +480,36 @@ export async function detectCorners(img) {
 }
 
 // Detección continua sobre el vídeo de la cámara (reutiliza un canvas pequeño).
+// Con la IA activa se usa el modelo (unos 100 ms por fotograma); si no está disponible, el método clásico.
 export function createLiveDetector(cv) {
   const canvas = document.createElement('canvas')
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  const engine = detectionEngine()
+  let useAi = engine !== 'classic'
+  const classic = (video) => {
+    const W = video.videoWidth
+    const H = video.videoHeight
+    const scale = Math.min(1, 360 / Math.max(W, H))
+    canvas.width = Math.round(W * scale)
+    canvas.height = Math.round(H * scale)
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+    const q = findQuad(cv, canvas)
+    return q ? q.map((p) => ({ x: p.x / scale, y: p.y / scale })) : null
+  }
   return {
-    detect(video) {
-      const W = video.videoWidth
-      const H = video.videoHeight
-      if (!W || !H) return null
-      const scale = Math.min(1, 360 / Math.max(W, H))
-      canvas.width = Math.round(W * scale)
-      canvas.height = Math.round(H * scale)
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      const q = findQuad(cv, canvas)
-      return q ? q.map((p) => ({ x: p.x / scale, y: p.y / scale })) : null
+    usesAi: () => useAi,
+    async detect(video) {
+      if (!video.videoWidth || !video.videoHeight) return null
+      if (useAi) {
+        try {
+          const q = await aiQuad(video)
+          if (q || engine === 'ai') return q
+        } catch (e) {
+          console.warn('IA no disponible en la cámara; se usa el método clásico', e)
+          useAi = false
+        }
+      }
+      return classic(video)
     },
     release: () => releaseCanvas(canvas),
   }
@@ -540,11 +601,16 @@ export async function warpImage(img, pts) {
 // Ajusta unas esquinas aproximadas (detección en vivo, recorte impreciso) a los bordes reales del papel
 // en la foto original: rectas robustas a lo largo de cada lado, con una primera banda ancha.
 export async function snapToPaper(img, pts) {
+  return snapCorners(img, pts, PASSES_WIDE)
+}
+
+// Afinado de unas esquinas dadas (IA o manuales) con rectas sobre los bordes reales del papel
+export async function snapCorners(img, pts, passes = PASSES_DEFAULT) {
   const { cv } = await loadCV()
   const fine = scaledCanvas(img, REFINE_SIDE)
   try {
     const s = fine.scale
-    const q = refineQuad(cv, fine.canvas, pts.map((p) => ({ x: p.x * s, y: p.y * s })), PASSES_WIDE)
+    const q = refineQuad(cv, fine.canvas, pts.map((p) => ({ x: p.x * s, y: p.y * s })), passes)
     const out = orderPoints(q.map((p) => ({ x: p.x / s, y: p.y / s })))
     return plausibleQuad(out) ? out : pts
   } finally {

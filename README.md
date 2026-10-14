@@ -55,13 +55,21 @@ modo sin conexión requieren HTTPS real**, es decir, publicar la app (Cloudflare
 
 ## Escáner: cómo procesa cada foto
 
-1. Detección del papel (`findQuad`) y afinado de cada lado con rectas robustas (`refineQuad`).
+1. Detección del papel con IA: modelo [DocAligner](https://github.com/DocsaidLab/DocAligner) LCNet100 (DocsaidLab,
+   Apache-2.0, `public/models/`), ejecutado en el dispositivo con ONNX Runtime Web (`src/lib/aiDetect.js`). Si la IA
+   no está segura, se usa el método clásico (`findQuad`). En ambos casos se afina cada lado con rectas robustas
+   (`refineQuad`). Se puede elegir el motor en Ajustes.
 2. Ajuste final al papel exacto (`snapToPaper`) y proporción real con corrección de perspectiva.
 3. Aplanado de papel curvado (`flattenDocument`): bordes curvos → parche de Coons; renglones curvos → desplazamiento vertical.
 4. Filtro *Documento*: iluminación uniforme, restos de fondo en los bordes eliminados, niveles adaptativos.
 5. Recorte manual con lupa 4× al arrastrar una esquina.
 
-Banco de pruebas con fotos sintéticas: `src/dev/scanBench.js` (`runBench`, `runWarpBench`, `runFlattenBench`).
+Banco de pruebas con fotos sintéticas: `src/dev/scanBench.js` (`runBench`, `runWarpBench`, `runFlattenBench`,
+`runAiBench` — compara IA y método clásico, incluidos fondos difíciles: mesa blanca, otros papeles, manteles).
+
+Por qué IA: el análisis REA de CamScanner Web (`docs/`, no publicado) muestra que su recorte automático no se hace en
+el navegador sino en su servidor (`/image/image_handle/auto_cut`) o en un módulo nativo de su app de escritorio.
+DocScan no usa su servicio: reproduce la técnica (red neuronal de detección de esquinas) con un modelo abierto.
 
 ## Limitaciones conocidas
 
