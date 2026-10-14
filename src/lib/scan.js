@@ -1199,9 +1199,14 @@ export async function flattenDocument(img, pts, { engine = flattenEngine() } = {
 
 export const FILTERS = [
   { id: 'original', label: 'Original' },
-  { id: 'enhance', label: 'Documento' },
+  { id: 'magic', label: 'Color mágico' }, // sin sombras + colores vivos + nitidez
+  { id: 'enhance', label: 'Documento' }, // papel blanco, tinta oscura
+  { id: 'noshadow', label: 'Sin sombras' }, // solo iluminación uniforme, colores reales
+  { id: 'lighten', label: 'Aclarar' }, // más luminoso (fotos oscuras)
   { id: 'gray', label: 'Gris' },
   { id: 'bw', label: 'B/N' },
+  { id: 'eco', label: 'Ahorro de tinta' }, // B/N con tinta gris
+  { id: 'nopen', label: 'Sin boli' }, // quita tinta azul/roja de bolígrafo, conserva lo impreso en negro
 ]
 
 // Corrige la iluminación: estima el "fondo" del papel (sin texto) a baja resolución y divide la
@@ -1218,6 +1223,21 @@ function normalizeIllumination(cv, src) {
     cv.resize(rgb, small, new cv.Size(0, 0), s, s, cv.INTER_AREA)
     cv.dilate(small, small, k) // el máximo local borra el texto oscuro
     cv.medianBlur(small, small, 21)
+    // La luz se estima con el brillo (máximo de los canales), igual para los tres canales, y el tono del
+    // papel con un factor global por canal: así un logo o una banda de color grande no se toma por
+    // "fondo" y no se blanquea (solo se aclara), pero el papel amarillento sigue quedando blanco.
+    const d = small.data
+    const n = d.length / 3
+    const ratios = [[], [], []]
+    for (let i = 0; i < n; i += 7) {
+      const v = Math.max(d[i * 3], d[i * 3 + 1], d[i * 3 + 2])
+      if (v > 40) for (let c = 0; c < 3; c++) ratios[c].push(d[i * 3 + c] / v)
+    }
+    const tint = ratios.map((r) => (r.length ? r.sort((a, b) => a - b)[Math.floor(r.length / 2)] : 1))
+    for (let i = 0; i < n; i++) {
+      const v = Math.max(d[i * 3], d[i * 3 + 1], d[i * 3 + 2])
+      for (let c = 0; c < 3; c++) d[i * 3 + c] = Math.max(1, Math.min(255, v * tint[c]))
+    }
     cv.resize(small, bg, new cv.Size(rgb.cols, rgb.rows), 0, 0, cv.INTER_LINEAR)
     cv.divide(rgb, bg, out, 255)
     return out
@@ -1231,7 +1251,7 @@ function normalizeIllumination(cv, src) {
 
 // Restos de mesa/fondo que quedan en los bordes al recortar papel curvado o con esquinas dobladas.
 // Desde cada borde hacia dentro se busca, línea a línea, una franja oscura cercana al borde (empieza en
-// el primer 5 % y acaba antes del 10 %). Solo se borra si continúa a lo largo de muchas líneas seguidas
+// el primer 2,5 % —más adentro suele ser un logo o una cabecera— y acaba antes del 10 %). Solo se borra si continúa a lo largo de muchas líneas seguidas
 // (≥ 4 % del lado) en una posición estable: así es un borde/resto de fondo y no una letra.
 const DARK = 150
 function whitenBorders(rgb, gray, orig) {
@@ -1251,7 +1271,7 @@ function whitenBorders(rgb, gray, orig) {
   }
   // n: píxeles desde el borde hacia dentro; m: número de líneas; idx(i, k): píxel k de la línea i
   const side = (n, m, idx) => {
-    const s0 = Math.ceil(n * 0.05)
+    const s0 = Math.ceil(n * 0.025)
     const lim = Math.ceil(n * 0.1)
     const starts = new Int32Array(m).fill(-1)
     const ends = new Int32Array(m).fill(-1)
@@ -1370,6 +1390,60 @@ function levels(img, gray) {
   img.convertTo(img, -1, alpha, -black * alpha)
 }
 
+// Satura los colores (factor k sobre la diferencia con el gris del píxel)
+function saturate(rgb, k) {
+  const d = rgb.data
+  for (let i = 0; i < d.length; i += 3) {
+    const l = (d[i] + d[i + 1] + d[i + 2]) / 3
+    for (let c = 0; c < 3; c++) d[i + c] = Math.max(0, Math.min(255, l + (d[i + c] - l) * k))
+  }
+}
+
+// Máscara de enfoque: realza los bordes de las letras
+function sharpen(cv, img, amount = 0.6) {
+  const blur = new cv.Mat()
+  try {
+    cv.GaussianBlur(img, blur, new cv.Size(0, 0), 1.5)
+    cv.addWeighted(img, 1 + amount, blur, -amount, 0, img)
+  } finally {
+    blur.delete()
+  }
+}
+
+// Curva de brillo (gamma < 1 aclara)
+function gamma(img, g) {
+  const lut = new Uint8Array(256).map((_, v) => Math.round(255 * (v / 255) ** g))
+  const d = img.data
+  for (let i = 0; i < d.length; i++) d[i] = lut[d[i]]
+}
+
+// Tinta de bolígrafo (azul, roja, verde…): píxeles con color intenso y no claros. El texto impreso es
+// negro/gris (sin color), así que se conserva. Se amplía un píxel para quitar el borde suavizado del trazo.
+function removeColoredInk(cv, rgb, gray) {
+  const W = gray.cols, H = gray.rows
+  const d = rgb.data
+  const mask = new cv.Mat(H, W, cv.CV_8UC1, new cv.Scalar(0))
+  const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5))
+  try {
+    const m = mask.data
+    for (let j = 0; j < W * H; j++) {
+      const r = d[j * 3], g = d[j * 3 + 1], b = d[j * 3 + 2]
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+      if (mx < 250 && mx - mn > 28 && (mx - mn) / (mx || 1) > 0.12) m[j] = 255
+    }
+    cv.dilate(mask, mask, k)
+    const g = gray.data
+    for (let j = 0; j < W * H; j++) {
+      if (!m[j]) continue
+      d[j * 3] = d[j * 3 + 1] = d[j * 3 + 2] = 255
+      g[j] = 255
+    }
+  } finally {
+    mask.delete()
+    k.delete()
+  }
+}
+
 export async function applyFilter(canvas, filter) {
   const out = document.createElement('canvas')
   if (filter === 'original') {
@@ -1386,12 +1460,28 @@ export async function applyFilter(canvas, filter) {
     cv.cvtColor(norm, gray, cv.COLOR_RGB2GRAY)
     whitenBorders(norm, gray, src)
     clearEdgeResidue(norm, gray, src)
-    if (filter === 'enhance') {
+    if (filter === 'nopen') removeColoredInk(cv, norm, gray)
+    if (filter === 'noshadow') {
+      cv.imshow(out, norm)
+    } else if (filter === 'lighten') {
+      gamma(norm, 0.75)
+      cv.imshow(out, norm)
+    } else if (filter === 'magic') {
+      levels(norm, gray)
+      saturate(norm, 1.45)
+      sharpen(cv, norm)
+      cv.imshow(out, norm)
+    } else if (filter === 'enhance' || filter === 'nopen') {
       levels(norm, gray)
       cv.imshow(out, norm)
     } else {
       levels(gray, gray)
-      if (filter === 'bw') cv.adaptiveThreshold(gray, gray, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 25, 14)
+      if (filter === 'bw' || filter === 'eco') cv.adaptiveThreshold(gray, gray, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 25, 14)
+      if (filter === 'eco') {
+        // Tinta gris en lugar de negra: legible y gasta bastante menos tóner/tinta
+        const g = gray.data
+        for (let i = 0; i < g.length; i++) if (g[i] < 128) g[i] = 95
+      }
       cv.imshow(out, gray)
     }
   } finally {

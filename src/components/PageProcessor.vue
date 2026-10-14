@@ -5,7 +5,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import CropEditor from './CropEditor.vue'
 import { canvasToPage, cropPage, DEFAULT_FILTER, DEFAULT_FLATTEN, findCorners, loadSource, renderPage } from '../lib/process'
-import { FILTERS, fullCorners, releaseCanvas } from '../lib/scan'
+import { applyFilter, FILTERS, fullCorners, releaseCanvas } from '../lib/scan'
 
 const props = defineProps({
   source: { type: Blob, required: true },
@@ -30,6 +30,7 @@ const flatten = ref(props.initial?.flatten ?? DEFAULT_FLATTEN)
 const rotation = ref(props.initial?.rotation || 0)
 const flattened = ref('')
 const preview = ref('')
+const thumbs = ref({}) // miniatura de cada filtro aplicada a esta página
 
 // Canvas fuera de la reactividad; se liberan al terminar (límite de memoria de iOS)
 const c = { src: null, warped: null, out: null }
@@ -80,6 +81,24 @@ async function recrop() {
   flattened.value = r.flattened
 }
 
+// Miniaturas de todos los filtros sobre una copia pequeña de la página (como la tira de CamScanner)
+async function makeThumbs() {
+  const w = c.warped
+  const k = Math.min(1, 220 / Math.max(w.width, w.height))
+  const small = document.createElement('canvas')
+  small.width = Math.max(1, Math.round(w.width * k))
+  small.height = Math.max(1, Math.round(w.height * k))
+  small.getContext('2d').drawImage(w, 0, 0, small.width, small.height)
+  const t = {}
+  for (const f of FILTERS) {
+    const r = await applyFilter(small, f.id)
+    t[f.id] = r.toDataURL('image/jpeg', 0.7)
+    releaseCanvas(r)
+  }
+  releaseCanvas(small)
+  thumbs.value = t
+}
+
 async function render() {
   releaseCanvas(c.out)
   c.out = await renderPage(c.warped, filter.value, rotation.value)
@@ -91,6 +110,7 @@ const confirmCrop = () =>
     await recrop()
     await render()
     step.value = 'filter'
+    await makeThumbs()
   })
 
 const setFilter = (f) =>
@@ -109,6 +129,7 @@ const toggleFlatten = () =>
   task('Aplanando el papel…', async () => {
     await recrop()
     await render()
+    await makeThumbs()
   })
 
 const finish = () =>
@@ -141,11 +162,22 @@ onBeforeUnmount(() => {
 
     <div v-if="step === 'filter'">
       <img :src="preview" class="preview" alt="Vista previa" />
-      <div class="row center">
-        <button class="btn" title="Girar a la izquierda" :disabled="!!busy" @click="rotate(-90)">↺</button>
-        <button v-for="f in FILTERS" :key="f.id" :class="['btn', { primary: filter === f.id }]" :disabled="!!busy" @click="setFilter(f.id)">
-          {{ f.label }}
+      <div class="filters" role="listbox" aria-label="Filtros">
+        <button
+          v-for="f in FILTERS"
+          :key="f.id"
+          role="option"
+          :aria-selected="filter === f.id"
+          :class="['fbtn', { on: filter === f.id }]"
+          :disabled="!!busy"
+          @click="setFilter(f.id)"
+        >
+          <span class="thumb"><img v-if="thumbs[f.id]" :src="thumbs[f.id]" alt="" /></span>
+          <span class="flabel">{{ f.label }}</span>
         </button>
+      </div>
+      <div class="row center">
+        <button class="btn" title="Girar a la izquierda" :disabled="!!busy" @click="rotate(-90)">↺ Girar</button>
         <button class="btn" title="Girar a la derecha" :disabled="!!busy" @click="rotate(90)">↻ Girar</button>
       </div>
       <div class="row center flat">
@@ -166,6 +198,14 @@ onBeforeUnmount(() => {
 .center { justify-content: center; margin: 12px 0; }
 .preview { max-width: 100%; max-height: 58vh; box-shadow: 0 2px 12px rgba(0, 0, 0, .15); }
 .flat { font-size: .9rem; }
+.filters { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 8px; margin: 10px 0 0; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; }
+.fbtn { flex: 0 0 auto; width: 76px; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px; border: 2px solid transparent; border-radius: 10px; background: var(--surface); font: inherit; cursor: pointer; scroll-snap-align: start; }
+.fbtn.on { border-color: var(--accent); background: var(--accent-soft); }
+.fbtn:disabled { opacity: .6; }
+.thumb { width: 64px; height: 84px; display: flex; align-items: center; justify-content: center; background: var(--border); border-radius: 6px; overflow: hidden; }
+.thumb img { max-width: 100%; max-height: 100%; }
+.flabel { font-size: .72rem; line-height: 1.15; text-align: center; }
+.fbtn.on .flabel { color: var(--accent-dark); font-weight: 600; }
 .flat label { display: flex; align-items: center; gap: 6px; }
 .warn { background: #fff4e5; border: 1px solid #f0c27a; color: #7a4b00; border-radius: 8px; padding: 8px 12px; font-size: .9rem; }
 </style>

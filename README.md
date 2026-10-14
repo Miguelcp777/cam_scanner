@@ -65,7 +65,9 @@ modo sin conexión requieren HTTPS real**, es decir, publicar la app (Cloudflare
    falla): bordes curvos → parche de Coons. En ambos casos, después, con los fragmentos de texto
    (palabras, columnas de tique, separadores) se calcula una base suave de inclinación y una corrección por renglón, que
    endereza también esquinas levantadas y dobleces locales.
-4. Filtro *Documento*: iluminación uniforme, restos de fondo en los bordes eliminados, niveles adaptativos.
+4. Filtros (tira con miniaturas): Original, Color mágico, Documento, Sin sombras, Aclarar, Gris, B/N, Ahorro de tinta y
+   Sin boli (quita tinta azul/roja de bolígrafo). Todos salvo Original: iluminación uniforme (la luz se estima con el brillo
+   para no blanquear logos de color) y restos de fondo en los bordes eliminados.
 5. Recorte manual con lupa 4× al arrastrar una esquina.
 
 Banco de pruebas con fotos sintéticas: `src/dev/scanBench.js` (`runBench`, `runWarpBench`, `runFlattenBench`,
