@@ -3,7 +3,13 @@ import vue from '@vitejs/plugin-vue'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import { VitePWA } from 'vite-plugin-pwa'
 
+// Aislamiento entre orígenes (también en public/_headers para Cloudflare Pages): permite
+// SharedArrayBuffer y, con ello, que ONNX Runtime use varios hilos en la IA.
+const isolation = { 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp' }
+
 export default defineConfig(({ mode }) => ({
+  server: { headers: isolation },
+  preview: { headers: isolation },
   plugins: [
     vue(),
     // `npm run dev:phone`: HTTPS autofirmado en la red local (la cámara del iPhone exige HTTPS)

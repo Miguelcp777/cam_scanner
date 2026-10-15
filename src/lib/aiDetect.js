@@ -4,6 +4,8 @@
 //  - Salida: 4 mapas de calor (uno por esquina). Para cada uno se umbraliza al 0,3, se toma la mancha
 //    más grande y su centroide (ponderado por el calor) es la esquina; se escala al tamaño original.
 import wasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url'
+// Código de arranque de ONNX Runtime como archivo aparte: los hilos (workers) lo cargan por URL
+import mjsUrl from 'onnxruntime-web/ort-wasm-simd-threaded.mjs?url'
 
 // Se probó también FastViT-T8 (13 MB): menos confianza en las pruebas y casi 3 veces más pesado.
 export const AI_MODELS = {
@@ -19,11 +21,26 @@ const THRESHOLD = 0.3
 const sessions = {}
 let ortPromise = null
 
+// Hilos: con aislamiento entre orígenes (cabeceras COOP/COEP, ver public/_headers) la IA usa varios
+// núcleos (~4–5 veces más rápida que con uno). En desarrollo Vite transforma el código de los hilos y no
+// arrancan, así que se usa uno. Si alguna vez no arrancan en el dispositivo, se recuerda y se usa uno.
+const THREADS_KEY = 'aiSingleThread'
+const INIT_TIMEOUT = 20000
+
+function threadCount() {
+  let broken = false
+  try {
+    broken = localStorage.getItem(THREADS_KEY) === '1'
+  } catch {}
+  if (import.meta.env.DEV || broken || !self.crossOriginIsolated) return 1
+  return Math.min(4, navigator.hardwareConcurrency || 1)
+}
+
 function loadOrt() {
   if (!ortPromise) {
     ortPromise = import('onnxruntime-web/wasm').then((ort) => {
-      ort.env.wasm.wasmPaths = { wasm: wasmUrl }
-      ort.env.wasm.numThreads = 1 // sin cabeceras COOP/COEP no hay hilos; evita avisos y fallos en iOS
+      ort.env.wasm.wasmPaths = { wasm: wasmUrl, mjs: mjsUrl }
+      ort.env.wasm.numThreads = threadCount()
       return { ort }
     })
   }
@@ -34,8 +51,37 @@ export function loadAiModel(name = DEFAULT_AI_MODEL) {
   if (!sessions[name]) {
     sessions[name] = loadOrt().then(async ({ ort }) => {
       const url = import.meta.env.BASE_URL + AI_MODELS[name].file // ruta desde la raíz de la app, no de la página actual
-      const session = await ort.InferenceSession.create(url, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' })
-      return { ort, session }
+      const res = await fetch(url) // la descarga (15 MB la primera vez) no cuenta para el límite de tiempo
+      if (!res.ok) throw new Error(`No se pudo descargar el modelo (${res.status})`)
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      // Si los hilos no arrancan, la creación no termina nunca: mejor fallar (los llamadores usan el
+      // método clásico) y usar un solo hilo desde el próximo arranque de la app
+      let timer
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          if (ort.env.wasm.numThreads > 1) {
+            try {
+              localStorage.setItem(THREADS_KEY, '1')
+            } catch {}
+          }
+          reject(new Error('La IA no arrancó a tiempo'))
+        }, INIT_TIMEOUT)
+      })
+      const creating = ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' })
+      // Si al final sí arranca (p. ej. la app estuvo en segundo plano y el temporizador saltó antes), se olvida el fallo
+      if (ort.env.wasm.numThreads > 1) {
+        creating.then(() => {
+          try {
+            localStorage.removeItem(THREADS_KEY)
+          } catch {}
+        }, () => {})
+      }
+      try {
+        const session = await Promise.race([creating, timeout])
+        return { ort, session }
+      } finally {
+        clearTimeout(timer)
+      }
     })
     sessions[name].catch(() => delete sessions[name]) // permitir reintentar si falla la descarga
   }

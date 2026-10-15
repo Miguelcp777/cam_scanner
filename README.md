@@ -37,6 +37,10 @@ modo sin conexión requieren HTTPS real**, es decir, publicar la app (Cloudflare
 - **Exportar**: botón *Compartir / Guardar* (hoja del sistema: Fotos, Archivos, WhatsApp…). Aparece tras generar
   el archivo porque Safari exige un toque reciente del usuario.
 - **Memoria**: fotos reducidas a 3000 px y canvas liberados tras cada página (límite de memoria de canvas en iOS).
+- **Velocidad**: la IA usa varios núcleos gracias a las cabeceras COOP/COEP de `public/_headers` (aislamiento entre
+  orígenes); si los hilos no arrancan en un dispositivo, se recuerda y se usa uno. La IA de aplanado solo se ejecuta si
+  el papel está curvado (se mide antes sin IA), el JPEG original se comprime en paralelo y las miniaturas de filtros se
+  generan en segundo plano. Perfil de tiempos: `src/dev/perfBench.js`.
 
 ## Arquitectura
 

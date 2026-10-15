@@ -1044,9 +1044,8 @@ function textDisplacement(cv, mat) {
   return { at: gridSampler(D, gw, gh, W, H), max, lines: lines.length }
 }
 
-function straightenLines(cv, mat) {
+function straightenLines(cv, mat, f = textDisplacement(cv, mat)) {
   const w = mat.cols, h = mat.rows
-  const f = textDisplacement(cv, mat)
   if (!f) return null
   // D está en coordenadas de origen (y_salida = y_origen − D). Se invierte columna a columna
   // recorriendo el origen: exacto aunque haya dobleces bruscas (una iteración de punto fijo no basta).
@@ -1109,11 +1108,33 @@ function plausibleGrid({ gx, gy, cols, rows }, w, h) {
   return bad < rows * cols * 0.02
 }
 
-// Aplanado con IA sobre el recorte con perspectiva corregida (con margen para que la red vea los bordes)
-async function aiFlatten(cv, img, pts, w, h) {
+// Curvatura real de los renglones (px): lo que el desplazamiento se aparta de una recta en cada fila.
+// Una inclinación uniforme (la página algo girada) da 0: eso lo corrige el enderezado sin IA. Se toma el
+// percentil 75 de las filas: un renglón suelto mal medido no dispara la IA; una curvatura real sí.
+function textBend(f, W, H) {
+  const rowMax = []
+  const N = 32
+  for (let r = 1; r < 16; r++) {
+    const y = (r * (H - 1)) / 16
+    const xs = [], ds = []
+    for (let k = 0; k < N; k++) {
+      const x = (k * (W - 1)) / (N - 1)
+      xs.push(x)
+      ds.push(f.at(x, y))
+    }
+    const mx = xs.reduce((a, b) => a + b) / N, md = ds.reduce((a, b) => a + b) / N
+    let sxy = 0, sxx = 0
+    xs.forEach((x, k) => { sxy += (x - mx) * (ds[k] - md); sxx += (x - mx) ** 2 })
+    const m = sxy / sxx
+    rowMax.push(Math.max(...ds.map((d, k) => Math.abs(d - (md + m * (xs[k] - mx))))))
+  }
+  rowMax.sort((a, b) => a - b)
+  return rowMax[Math.floor(rowMax.length * 0.75)]
+}
+
+// Aplanado con IA sobre el recorte con perspectiva corregida y margen (para que la red vea los bordes)
+async function aiFlatten(cv, padded, w, h) {
   const { aiDewarpGrid } = await import('./aiDetect')
-  const pad = Math.round(Math.max(w, h) * 0.06)
-  const padded = warpToMat(cv, img, pts, w, h, pad)
   let mat = null
   try {
     const input = document.createElement('canvas')
@@ -1144,28 +1165,20 @@ async function aiFlatten(cv, img, pts, w, h) {
     cv.imshow(canvas, mat)
     return { canvas, edges: false, lines: !!straight, ai: true }
   } finally {
-    padded.delete()
     mat?.delete()
   }
 }
 
 // Devuelve { canvas, edges, lines, ai } o null si el papel no está curvado (usar el recorte normal).
+// Primero se mide la curvatura sin IA (bordes del papel y renglones, ~0,2 s); la red, más lenta, solo
+// se ejecuta si el papel está realmente curvado. Si solo está algo inclinado basta el enderezado.
 export async function flattenDocument(img, pts, { engine = flattenEngine() } = {}) {
   const { cv } = await loadCV()
   const { w, h } = targetSize(img, pts)
-  if (engine === 'ai') {
-    try {
-      const r = await aiFlatten(cv, img, pts, w, h)
-      if (r) return r
-    } catch (e) {
-      console.warn('Aplanado con IA no disponible; se usa el clásico', e)
-    }
-  }
-  const pad = Math.round(Math.max(w, h) * 0.05)
+  const pad = Math.round(Math.max(w, h) * 0.06)
   const padded = warpToMat(cv, img, pts, w, h, pad)
   let mat = null
   let edges = false
-  let lines = false
   try {
     const curves = findEdgeCurves(cv, padded, pad, w, h)
     const dev = Math.max(
@@ -1173,24 +1186,35 @@ export async function flattenDocument(img, pts, { engine = flattenEngine() } = {
         curves[k] ? Math.max(...[0, 0.25, 0.5, 0.75, 1].map((t) => Math.abs(evalPoly(curves[k], t)))) : 0,
       ),
     )
-    if (dev > Math.max(w, h) * 0.004) {
+    const curvedEdges = dev > Math.max(w, h) * 0.004
+    const roi = padded.roi(new cv.Rect(pad, pad, w, h))
+    mat = roi.clone()
+    roi.delete()
+    let text = textDisplacement(cv, mat)
+    const curvedText = !!text && textBend(text, w, h) > Math.max(2, h * 0.003)
+    if (engine === 'ai' && (curvedEdges || curvedText)) {
+      try {
+        const r = await aiFlatten(cv, padded, w, h)
+        if (r) return r
+      } catch (e) {
+        console.warn('Aplanado con IA no disponible; se usa el clásico', e)
+      }
+    }
+    if (curvedEdges) {
+      mat.delete()
       mat = coonsRemap(cv, padded, pad, w, h, curves)
       edges = true
-    } else {
-      const roi = padded.roi(new cv.Rect(pad, pad, w, h))
-      mat = roi.clone()
-      roi.delete()
+      text = textDisplacement(cv, mat)
     }
-    const straight = straightenLines(cv, mat)
+    const straight = straightenLines(cv, mat, text)
     if (straight) {
       mat.delete()
       mat = straight
-      lines = true
     }
-    if (!edges && !lines) return null
+    if (!edges && !straight) return null
     const canvas = document.createElement('canvas')
     cv.imshow(canvas, mat)
-    return { canvas, edges, lines }
+    return { canvas, edges, lines: !!straight }
   } finally {
     padded.delete()
     mat?.delete()

@@ -34,7 +34,7 @@ const thumbs = ref({}) // miniatura de cada filtro aplicada a esta página
 
 // Canvas fuera de la reactividad; se liberan al terminar (límite de memoria de iOS)
 const c = { src: null, warped: null, out: null }
-let original = null
+let originalP = null // JPEG del original (se comprime en segundo plano)
 
 async function task(label, fn) {
   busy.value = label
@@ -53,8 +53,8 @@ onMounted(() =>
   task('Detectando bordes…', async () => {
     const s = await loadSource(props.source, { isOriginal: props.isOriginal })
     c.src = s.canvas
-    original = s.original
-    url.value = URL.createObjectURL(original)
+    originalP = s.originalP
+    url.value = URL.createObjectURL(props.source) // para el recorte basta la foto tal cual
     size.value = { w: c.src.width, h: c.src.height }
     if (props.initial?.points) {
       points.value = props.initial.points.map((p) => ({ ...p }))
@@ -81,22 +81,31 @@ async function recrop() {
   flattened.value = r.flattened
 }
 
-// Miniaturas de todos los filtros sobre una copia pequeña de la página (como la tira de CamScanner)
+// Miniaturas de todos los filtros sobre una copia pequeña de la página (como la tira de CamScanner).
+// Se generan en segundo plano: los botones funcionan mientras tanto; una tanda nueva anula la anterior.
+let thumbRun = 0
 async function makeThumbs() {
+  const run = ++thumbRun
+  thumbs.value = {}
   const w = c.warped
+  if (!w) return
   const k = Math.min(1, 220 / Math.max(w.width, w.height))
   const small = document.createElement('canvas')
   small.width = Math.max(1, Math.round(w.width * k))
   small.height = Math.max(1, Math.round(w.height * k))
   small.getContext('2d').drawImage(w, 0, 0, small.width, small.height)
   const t = {}
-  for (const f of FILTERS) {
-    const r = await applyFilter(small, f.id)
-    t[f.id] = r.toDataURL('image/jpeg', 0.7)
-    releaseCanvas(r)
+  try {
+    for (const f of FILTERS) {
+      if (run !== thumbRun) return
+      const r = await applyFilter(small, f.id)
+      t[f.id] = r.toDataURL('image/jpeg', 0.7)
+      releaseCanvas(r)
+      thumbs.value = { ...t } // aparecen una a una
+    }
+  } finally {
+    releaseCanvas(small)
   }
-  releaseCanvas(small)
-  thumbs.value = t
 }
 
 async function render() {
@@ -110,7 +119,7 @@ const confirmCrop = () =>
     await recrop()
     await render()
     step.value = 'filter'
-    await makeThumbs()
+    makeThumbs()
   })
 
 const setFilter = (f) =>
@@ -129,16 +138,17 @@ const toggleFlatten = () =>
   task('Aplanando el papel…', async () => {
     await recrop()
     await render()
-    await makeThumbs()
+    makeThumbs()
   })
 
 const finish = () =>
   task('Guardando página…', async () => {
     const page = await canvasToPage(c.out)
-    emit('done', { ...page, original, points: points.value, filter: filter.value, flatten: flatten.value, rotation: rotation.value })
+    emit('done', { ...page, original: await originalP, points: points.value, filter: filter.value, flatten: flatten.value, rotation: rotation.value })
   })
 
 onBeforeUnmount(() => {
+  thumbRun++
   Object.values(c).forEach(releaseCanvas)
   URL.revokeObjectURL(url.value)
 })

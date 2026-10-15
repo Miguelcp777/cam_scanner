@@ -19,10 +19,11 @@ export const DEFAULT_FLATTEN = true
 
 // Foto → canvas de trabajo (≤3000 px) y su JPEG, que se guarda como "original" para poder reeditar.
 // Si la foto ya es un original guardado, no se vuelve a comprimir (evita perder calidad en cada edición).
+// originalP es una promesa: la compresión (~1 s) avanza mientras se detectan bordes y se recorta.
 export async function loadSource(blob, { isOriginal = false } = {}) {
   const canvas = await prepareImage(blob)
-  const original = isOriginal ? blob : await canvasToBlob(canvas, 'image/jpeg', 0.9)
-  return { canvas, original }
+  const originalP = isOriginal ? Promise.resolve(blob) : canvasToBlob(canvas, 'image/jpeg', 0.9)
+  return { canvas, originalP }
 }
 
 // Esquinas automáticas; si la foto no deja ver el documento, las vistas en vivo; si no, la imagen entera
@@ -72,7 +73,7 @@ export async function canvasToPage(out) {
 
 // Página completa sin intervención (modo ráfaga e importación de varias imágenes)
 export async function autoPage(blob, hint = null, { filter = DEFAULT_FILTER, flatten = DEFAULT_FLATTEN } = {}) {
-  const { canvas, original } = await loadSource(blob)
+  const { canvas, originalP } = await loadSource(blob)
   try {
     const { points, detected } = await findCorners(canvas, hint)
     const { warped, points: pts } = await cropPage(canvas, points, { snap: detected, flatten })
@@ -82,7 +83,7 @@ export async function autoPage(blob, hint = null, { filter = DEFAULT_FILTER, fla
       id: uid(),
       ...(await canvasToPage(out)),
       text: '',
-      original,
+      original: await originalP,
       points: pts,
       filter,
       flatten,
